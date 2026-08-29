@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+<title>Growth Quest</title>
+
+<meta name="theme-color" content="#120d0b">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Growth Quest">
+<meta name="mobile-web-app-capable" content="yes">
+
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700;800&display=swap">
+<link rel="stylesheet" href="styles.css">
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+</head>
+<body>
+
+<div id="app">
+
+  <header class="topbar">
+    <h1 id="topbar-title">Growth Quest</h1>
+    <button id="settings-btn" class="settings-btn" aria-label="Settings">⚙️</button>
+  </header>
+
+  <main id="views">
+
+    <!-- Home: growth dashboard -->
+    <section id="view-home" class="view">
+      <div class="ring-wrap">
+        <svg viewBox="0 0 200 200" class="ring-svg">
+          <circle cx="100" cy="100" r="84" class="ring-bg"></circle>
+          <circle cx="100" cy="100" r="84" class="ring-fg" id="ring-fg"></circle>
+        </svg>
+        <div class="ring-label">
+          <div class="ring-percent" id="ring-percent">0%</div>
+          <div class="ring-caption">Today's Progress</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Daily Quests</h2>
+        <div class="quick-add-row">
+          <input type="text" id="task-quick-input" class="quick-source" placeholder="To-do">
+          <button id="task-quick-add-btn" class="quick-add-btn">Add</button>
+        </div>
+        <ul id="today-task-list" class="item-list today-task-list"></ul>
+        <p id="today-task-empty" class="empty-note">No quests yet today</p>
+      </div>
+
+      <div class="card">
+        <h2>Mood Board</h2>
+        <textarea id="emotion-input" rows="3" placeholder="How are you feeling?"></textarea>
+        <button id="emotion-save-btn" class="save-btn-block">Save</button>
+        <p class="empty-note" id="emotion-sync-feedback"></p>
+        <div id="emotion-log-list" class="emotion-log-list"></div>
+        <p id="emotion-log-empty" class="empty-note">No entries yet</p>
+      </div>
+    </section>
+
+    <!-- Habits -->
+    <section id="view-habits" class="view">
+      <div class="habit-stats-row">
+        <div class="stat-pill">
+          <div class="stat-value" id="habit-count-stat">0</div>
+          <div class="stat-label">Habits</div>
+        </div>
+        <div class="stat-pill">
+          <div class="stat-value" id="habit-rate-stat">0%</div>
+          <div class="stat-label">This Month</div>
+        </div>
+      </div>
+
+      <div class="month-nav">
+        <button id="month-prev" aria-label="Previous month">‹</button>
+        <div id="month-label">August 2026</div>
+        <button id="month-next" aria-label="Next month">›</button>
+      </div>
+
+      <div class="grid-card">
+        <div class="grid-scroll" id="habit-grid-scroll">
+          <table class="habit-grid" id="habit-grid-table"></table>
+        </div>
+      </div>
+      <p id="habit-empty" class="empty-note">No habits yet. Tap + to add one.</p>
+
+      <div class="card" id="habit-chart-card">
+        <h2>Progress Trend</h2>
+        <div class="chart-wrap">
+          <canvas id="habit-chart" height="180"></canvas>
+        </div>
+      </div>
+    </section>
+
+    <!-- Income -->
+    <section id="view-income" class="view">
+      <div class="quick-add-card">
+        <div class="quick-add-row">
+          <input type="date" id="income-quick-date" class="quick-date">
+          <input type="number" inputmode="numeric" id="income-quick-amount" class="quick-amount" placeholder="💲">
+        </div>
+        <div class="quick-add-row">
+          <input type="text" id="income-quick-source" list="income-source-list" class="quick-source" placeholder="Category">
+          <button id="income-quick-add-btn" class="quick-add-btn">Add</button>
+        </div>
+      </div>
+
+      <div class="month-nav">
+        <button id="income-month-prev" aria-label="Previous month">‹</button>
+        <div id="income-month-label">August 2026</div>
+        <button id="income-month-next" aria-label="Next month">›</button>
+      </div>
+
+      <div class="habit-stats-row">
+        <div class="stat-pill">
+          <div class="stat-value" id="income-month-total-stat">¥0</div>
+          <div class="stat-label">This Month</div>
+        </div>
+        <div class="stat-pill">
+          <div class="stat-value" id="income-year-total-stat">¥0</div>
+          <div class="stat-label" id="income-year-total-label">2026 Total</div>
+        </div>
+      </div>
+
+      <ul id="income-list" class="item-list"></ul>
+      <p id="income-empty" class="empty-note">No income yet this month. Add one above.</p>
+
+      <div class="card">
+        <h2>Daily Trend</h2>
+        <div class="chart-wrap">
+          <canvas id="income-chart" height="180"></canvas>
+        </div>
+      </div>
+    </section>
+
+    <!-- Expense -->
+    <section id="view-expense" class="view">
+      <div class="quick-add-card">
+        <div class="quick-add-row">
+          <input type="date" id="expense-quick-date" class="quick-date">
+          <input type="number" inputmode="numeric" id="expense-quick-amount" class="quick-amount" placeholder="💲">
+        </div>
+        <div class="quick-add-row">
+          <input type="text" id="expense-quick-category" list="expense-category-list" class="quick-source" placeholder="Category">
+          <button id="expense-quick-add-btn" class="quick-add-btn">Add</button>
+        </div>
+      </div>
+
+      <div class="month-nav">
+        <button id="expense-month-prev" aria-label="Previous month">‹</button>
+        <div id="expense-month-label">August 2026</div>
+        <button id="expense-month-next" aria-label="Next month">›</button>
+      </div>
+
+      <div class="habit-stats-row">
+        <div class="stat-pill">
+          <div class="stat-value" id="expense-month-total-stat">¥0</div>
+          <div class="stat-label">This Month</div>
+        </div>
+        <div class="stat-pill">
+          <div class="stat-value" id="expense-year-total-stat">¥0</div>
+          <div class="stat-label" id="expense-year-total-label">2026 Total</div>
+        </div>
+      </div>
+
+      <ul id="expense-list" class="item-list"></ul>
+      <p id="expense-empty" class="empty-note">No expenses yet this month. Add one above.</p>
+
+      <div class="card">
+        <h2>Daily Trend</h2>
+        <div class="chart-wrap">
+          <canvas id="expense-chart" height="180"></canvas>
+        </div>
+      </div>
+    </section>
+
+    <!-- Goals -->
+    <section id="view-goals" class="view">
+      <ul id="goal-list" class="item-list"></ul>
+      <p id="goal-empty" class="empty-note">No goals yet. Tap + to add your vision.</p>
+    </section>
+
+  </main>
+
+  <button id="fab" class="fab" aria-label="Add">＋</button>
+
+  <nav class="tabbar">
+    <button class="tab-btn active" data-view="home">
+      <span class="tab-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 17 9 11 13 15 21 6"></polyline><polyline points="15 6 21 6 21 12"></polyline></svg>
+      </span><span>Growth</span>
+    </button>
+    <button class="tab-btn" data-view="habits">
+      <span class="tab-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="4"></rect><polyline points="8 12.5 11 15.5 16 9"></polyline></svg>
+      </span><span>Habits</span>
+    </button>
+    <button class="tab-btn" data-view="income">
+      <span class="tab-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"></circle><path d="M12 8v8"></path><path d="M8 12h8"></path></svg>
+      </span><span>Income</span>
+    </button>
+    <button class="tab-btn" data-view="expense">
+      <span class="tab-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"></circle><path d="M8 12h8"></path></svg>
+      </span><span>Expense</span>
+    </button>
+    <button class="tab-btn" data-view="goals">
+      <span class="tab-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 21V4"></path><path d="M5 5h13l-3 4 3 4H5"></path></svg>
+      </span><span>Goals</span>
+    </button>
+  </nav>
+
+</div>
+
+<!-- Goal add/edit sheet -->
+<div id="sheet-goal" class="sheet-overlay">
+  <div class="sheet">
+    <div class="sheet-header">
+      <button class="sheet-cancel" data-close-sheet="sheet-goal">Cancel</button>
+      <h3 id="goal-sheet-title">Add Goal</h3>
+      <button class="sheet-save" id="goal-save-btn">Save</button>
+    </div>
+    <div class="sheet-body">
+      <label class="field-label">Your Vision</label>
+      <input type="text" id="goal-title-input" placeholder="e.g. Become an independent engineer">
+
+      <label class="field-label">Notes</label>
+      <textarea id="goal-desc-input" rows="3" placeholder="Optional"></textarea>
+
+      <label class="field-label">
+        <input type="checkbox" id="goal-has-date-input"> Set a deadline
+      </label>
+      <input type="date" id="goal-date-input" class="hidden-field">
+
+      <label class="field-label">
+        <input type="checkbox" id="goal-has-amount-input"> Set a money goal (synced with Income)
+      </label>
+      <input type="number" inputmode="numeric" id="goal-amount-input" placeholder="Target amount (¥) e.g. 3000000" class="hidden-field">
+
+      <button id="goal-delete-btn" class="danger-btn hidden-field">Delete Goal</button>
+    </div>
+  </div>
+</div>
+
+<!-- Habit add/edit sheet -->
+<div id="sheet-habit" class="sheet-overlay">
+  <div class="sheet">
+    <div class="sheet-header">
+      <button class="sheet-cancel" data-close-sheet="sheet-habit">Cancel</button>
+      <h3 id="habit-sheet-title">Add Habit</h3>
+      <button class="sheet-save" id="habit-save-btn">Save</button>
+    </div>
+    <div class="sheet-body">
+      <label class="field-label">Habit</label>
+      <input type="text" id="habit-title-input" placeholder="e.g. Wake up at 5am">
+
+      <label class="field-label">Linked Goal</label>
+      <select id="habit-goal-select">
+        <option value="">None</option>
+      </select>
+
+      <button id="habit-delete-btn" class="danger-btn hidden-field">Delete Habit</button>
+    </div>
+  </div>
+</div>
+
+<!-- Income add/edit sheet -->
+<div id="sheet-income" class="sheet-overlay">
+  <div class="sheet">
+    <div class="sheet-header">
+      <button class="sheet-cancel" data-close-sheet="sheet-income">Cancel</button>
+      <h3 id="income-sheet-title">Edit Income</h3>
+      <button class="sheet-save" id="income-save-btn">Save</button>
+    </div>
+    <div class="sheet-body">
+      <label class="field-label">Date</label>
+      <input type="date" id="income-date-input">
+
+      <label class="field-label">💲 Amount</label>
+      <input type="number" inputmode="numeric" id="income-amount-input" placeholder="0">
+
+      <label class="field-label">Category</label>
+      <input type="text" id="income-source-input" list="income-source-list" placeholder="e.g. Freelance project A">
+      <datalist id="income-source-list"></datalist>
+
+      <button id="income-delete-btn" class="danger-btn">Delete Entry</button>
+    </div>
+  </div>
+</div>
+
+<!-- Expense add/edit sheet -->
+<div id="sheet-expense" class="sheet-overlay">
+  <div class="sheet">
+    <div class="sheet-header">
+      <button class="sheet-cancel" data-close-sheet="sheet-expense">Cancel</button>
+      <h3 id="expense-sheet-title">Edit Expense</h3>
+      <button class="sheet-save" id="expense-save-btn">Save</button>
+    </div>
+    <div class="sheet-body">
+      <label class="field-label">Date</label>
+      <input type="date" id="expense-date-input">
+
+      <label class="field-label">💲 Amount</label>
+      <input type="number" inputmode="numeric" id="expense-amount-input" placeholder="0">
+
+      <label class="field-label">Category</label>
+      <input type="text" id="expense-category-input" list="expense-category-list" placeholder="e.g. Groceries">
+      <datalist id="expense-category-list"></datalist>
+
+      <button id="expense-delete-btn" class="danger-btn">Delete Entry</button>
+    </div>
+  </div>
+</div>
+
+<!-- Monthly report -->
+<div id="sheet-report" class="sheet-overlay">
+  <div class="sheet">
+    <div class="sheet-header">
+      <button class="sheet-cancel" data-close-sheet="sheet-report">Close</button>
+      <h3 id="report-title">Monthly Report</h3>
+      <span></span>
+    </div>
+    <div class="sheet-body" id="report-body"></div>
+  </div>
+</div>
+
+<!-- Settings (Google Sheets integration) -->
+<div id="sheet-settings" class="sheet-overlay">
+  <div class="sheet">
+    <div class="sheet-header">
+      <button class="sheet-cancel" data-close-sheet="sheet-settings">Close</button>
+      <h3>Settings</h3>
+      <span></span>
+    </div>
+    <div class="sheet-body">
+      <button id="view-report-btn" class="save-btn-block">View This Month's Report</button>
+
+      <label class="field-label">Backup &amp; Transfer</label>
+      <p class="hint-box">
+        All your data lives only on this device/browser. Use "Export Backup" to save a copy of everything as a file,
+        and "Import Backup" to load it back in — handy when moving the app to a new address or device.
+      </p>
+      <button id="export-backup-btn" class="save-btn-block">Export Backup</button>
+      <input type="file" id="import-backup-input" accept="application/json" class="hidden-field">
+      <button id="import-backup-btn" class="quick-add-btn full-btn">Import Backup</button>
+      <p class="empty-note" id="backup-feedback"></p>
+
+      <p class="hint-box">
+        Income/expense transactions are appended to your Google Sheet whenever the month changes; Mood Board entries are appended the instant you save them.
+        First, create an OAuth Client ID with your own Google account and paste it below.
+        (Google Cloud Console → "APIs & Services" → "Credentials" → "Create OAuth client ID" → type "Web application",
+        add the origin this app is running on to "Authorized JavaScript origins" (e.g. http://localhost:8420))
+      </p>
+
+      <label class="field-label">Google OAuth Client ID</label>
+      <input type="text" id="google-client-id-input" placeholder="xxxxxxxx.apps.googleusercontent.com">
+      <button id="google-client-id-save-btn" class="save-btn-block">Save Client ID</button>
+
+      <div class="settings-status" id="google-status-box">
+        <div class="settings-status-label">Status</div>
+        <div class="settings-status-value" id="google-status-value">Not connected</div>
+      </div>
+
+      <button id="google-signin-btn" class="quick-add-btn full-btn">Sign in with Google</button>
+      <button id="google-sync-now-btn" class="save-btn-block">Sync Now (this month + unsent moods)</button>
+      <p class="empty-note" id="google-feedback"></p>
+      <button id="google-disconnect-btn" class="danger-btn">Disconnect</button>
+
+      <p class="hint-box">
+        This syncs automatically whenever you happen to open the app — not exactly at midnight on the 1st.
+        Opening the app right after a new month starts will try to sync automatically, but if your Google sign-in has
+        expired it can't send, so use "Sync Now" here to finish it manually. Your local data is never lost either way.
+      </p>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
