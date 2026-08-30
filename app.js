@@ -1060,17 +1060,13 @@
     closeSheet("sheet-settings");
   });
 
-  // --- 今日のやること(チェックすると消える) ---
-  function pruneAndGetTodayTasks() {
-    const todayStr = dateKey(new Date());
-    const before = state.todayTasks.length;
-    state.todayTasks = state.todayTasks.filter(t => t.date === todayStr);
-    if (state.todayTasks.length !== before) saveState();
+  // --- Daily Quests(チェックすると消える。未達成のものは日をまたいでも残り続ける) ---
+  function getTodayTasks() {
     return state.todayTasks;
   }
 
   function renderTodayTasks() {
-    const tasks = pruneAndGetTodayTasks();
+    const tasks = getTodayTasks();
     const list = document.getElementById("today-task-list");
     list.innerHTML = "";
     document.getElementById("today-task-empty").classList.toggle("show", tasks.length === 0);
