@@ -1,4 +1,4 @@
-const CACHE_NAME = "growthquest-v27";
+const CACHE_NAME = "growthquest-v28";
 const ASSETS = [
   "./",
   "./index.html",

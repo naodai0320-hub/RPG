@@ -1512,6 +1512,7 @@
     const totalIncome = state.incomes.reduce((s, i) => s + i.amount, 0);
     const totalExpense = state.expenses.reduce((s, e) => s + e.amount, 0);
     grid.push(["合計", "", totalIncome, "", "合計", "", totalExpense]);
+    grid.push(["差額(収入-支出)", "", totalIncome - totalExpense, "", "", "", ""]);
     return grid;
   }
 
@@ -1597,7 +1598,7 @@
   }
 
   /** 取引タブ専用: 収入(A〜C列・緑)と支出(E〜G列・赤)を左右に分けた2段見出しの色付けリクエストを作る */
-  function transactionsHeaderStyleRequests(sheetId) {
+  function transactionsHeaderStyleRequests(sheetId, totalsStartRowIndex) {
     const bandCell = (bg, fg) => ({
       userEnteredFormat: {
         backgroundColor: bg,
@@ -1608,7 +1609,7 @@
     });
     const fields = "userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,verticalAlignment)";
     const white = { red: 1, green: 1, blue: 1 };
-    return [
+    const requests = [
       { repeatCell: { range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: 3 }, cell: bandCell({ red: 0.24, green: 0.62, blue: 0.38 }, white), fields } },
       { repeatCell: { range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 4, endColumnIndex: 7 }, cell: bandCell({ red: 0.85, green: 0.29, blue: 0.22 }, white), fields } },
       { repeatCell: { range: { sheetId, startRowIndex: 1, endRowIndex: 2, startColumnIndex: 0, endColumnIndex: 3 }, cell: bandCell({ red: 0.86, green: 0.96, blue: 0.89 }, { red: 0.11, green: 0.35, blue: 0.19 }), fields } },
@@ -1618,6 +1619,17 @@
       { updateDimensionProperties: { range: { sheetId, dimension: "COLUMNS", startIndex: 3, endIndex: 4 }, properties: { pixelSize: 24 }, fields: "pixelSize" } },
       { updateDimensionProperties: { range: { sheetId, dimension: "COLUMNS", startIndex: 4, endIndex: 7 }, properties: { pixelSize: 130 }, fields: "pixelSize" } },
     ];
+    if (typeof totalsStartRowIndex === "number") {
+      // 「合計」「差額」の2行を太字+薄い色の帯にして目立たせる
+      requests.push({
+        repeatCell: {
+          range: { sheetId, startRowIndex: totalsStartRowIndex, endRowIndex: totalsStartRowIndex + 2, startColumnIndex: 0, endColumnIndex: 7 },
+          cell: { userEnteredFormat: { backgroundColor: { red: 0.94, green: 0.94, blue: 0.94 }, textFormat: { bold: true } } },
+          fields: "userEnteredFormat(backgroundColor,textFormat)",
+        },
+      });
+    }
+    return requests;
   }
 
   /** 見やすいデザインに整える: ヘッダーの色付け・見出し固定・列幅に加えて、
@@ -1630,7 +1642,10 @@
     const summary = props[SHEET_SUMMARY];
     const requests = [];
 
-    if (tx) requests.push(...transactionsHeaderStyleRequests(tx.sheetId));
+    if (tx) {
+      const txRowCount = buildIncomeExpenseGrid().length;
+      requests.push(...transactionsHeaderStyleRequests(tx.sheetId, txRowCount - 2));
+    }
     if (moods) requests.push(...headerStyleRequests(moods.sheetId, 2));
     if (summary) requests.push(...headerStyleRequests(summary.sheetId, 4));
 
