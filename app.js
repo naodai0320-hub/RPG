@@ -14,7 +14,7 @@
     const empty = {
       goals: [], habits: [], incomes: [], expenses: [],
       todayTasks: [], emotionLogs: [],
-      lastSeenReportMonth: null,
+      lastSeenReportMonth: null, lastRecurringExpenseMonth: null,
       googleClientId: null, googleSpreadsheetId: null, googleFeelingsSheetReady: false, lastSyncedMonth: null,
       googleSheetStyled: false, googleSummarySheetReady: false, googleSheetMigratedJa: false,
       googleTxSplitByMonth: false,
@@ -31,6 +31,7 @@
         todayTasks: parsed.todayTasks || [],
         emotionLogs: parsed.emotionLogs || [],
         lastSeenReportMonth: parsed.lastSeenReportMonth ?? null,
+        lastRecurringExpenseMonth: parsed.lastRecurringExpenseMonth ?? null,
         googleClientId: parsed.googleClientId ?? null,
         googleSpreadsheetId: parsed.googleSpreadsheetId ?? null,
         googleFeelingsSheetReady: parsed.googleFeelingsSheetReady ?? false,
@@ -69,6 +70,15 @@
   }
 
   let state = loadState();
+  // 月が変わったら自動で追加する固定費(毎月1日付けの支出として計上)
+  const RECURRING_MONTHLY_EXPENSES = [
+    { category: "家賃", amount: 35000 },
+    { category: "携帯代+アプリ", amount: 15000 },
+    { category: "イラストレーター", amount: 9000 },
+    { category: "ジム", amount: 3300 },
+    { category: "クラウド", amount: 3300 },
+  ];
+
   const WEEKDAY_LABELS = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
   const MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
   function formatMonthYear(year, month) { return `${MONTH_NAMES[month]} ${year}`; }
@@ -185,6 +195,7 @@
           todayTasks: parsed.todayTasks || [],
           emotionLogs: parsed.emotionLogs || [],
           lastSeenReportMonth: parsed.lastSeenReportMonth ?? null,
+          lastRecurringExpenseMonth: parsed.lastRecurringExpenseMonth ?? null,
           googleClientId: parsed.googleClientId ?? null,
           googleSpreadsheetId: parsed.googleSpreadsheetId ?? null,
           googleFeelingsSheetReady: parsed.googleFeelingsSheetReady ?? false,
@@ -1223,6 +1234,25 @@
     openSheet("sheet-report");
   }
 
+  /** 前回アプリを開いてから月が変わっていたら、固定費(家賃・携帯代など)を新しい月の1日付けで自動追加する。
+   *  初回起動時は過去分を遡って追加しないよう、今月を基準として記録するだけにする。 */
+  function maybeAddRecurringExpenses() {
+    const curKey = monthKeyNum(today.getFullYear(), today.getMonth());
+    if (state.lastRecurringExpenseMonth === null) {
+      state.lastRecurringExpenseMonth = curKey;
+      saveState();
+      return;
+    }
+    if (state.lastRecurringExpenseMonth === curKey) return;
+
+    const dateStr = `${today.getFullYear()}-${pad2(today.getMonth() + 1)}-01`;
+    RECURRING_MONTHLY_EXPENSES.forEach(item => {
+      state.expenses.push({ id: uid(), date: dateStr, amount: item.amount, category: item.category });
+    });
+    state.lastRecurringExpenseMonth = curKey;
+    saveState();
+  }
+
   /** 前回アプリを開いてから月が変わっていたら、直前の月のレポートを自動表示する。
    *  ただしこれは「アプリを開いたタイミング」での判定であり、月末ちょうどに通知されるわけではない。 */
   function maybeShowMonthlyReport() {
@@ -1928,6 +1958,7 @@
       if (input.value === oldTodayKey) input.value = dateKey(now);
     });
 
+    maybeAddRecurringExpenses();
     renderView(activeViewName());
     maybeShowMonthlyReport();
   }
@@ -1945,6 +1976,7 @@
   // ---------------------------------------------------------------------
   // Init
   // ---------------------------------------------------------------------
+  maybeAddRecurringExpenses();
   renderHabitGoalOptions();
   renderGoals();
   renderHabitsView();
