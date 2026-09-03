@@ -1335,8 +1335,8 @@
     state.googleSummarySheetReady = true;
     state.googleSheetMigratedJa = true; // 最初から日本語表記で作成しているので移行不要
     saveState();
-    await appendRowsToRange(token, `${SHEET_TX}!A:D`, [["日付", "種類", "金額", "内容"]]);
     await appendRowsToRange(token, `${SHEET_MOODS}!A:B`, [["日時", "内容"]]);
+    try { await syncTransactionsSheet(token); } catch (e) { console.error("initial transactions failed", e); }
     try { await syncSummarySheet(token); } catch (e) { console.error("initial summary failed", e); }
     try { await applySheetFormatting(token); } catch (e) { console.error("initial sheet styling failed", e); }
     return state.googleSpreadsheetId;
@@ -1515,6 +1515,44 @@
     if (!res.ok) throw new Error(`summary update failed: ${res.status}`);
   }
 
+  /** 収入(A〜C列)と支出(E〜G列)を左右に分けた2次元配列を組み立てる。
+   *  1行目=区分見出し、2行目=列見出し、以降データ、最終行=合計。 */
+  function buildIncomeExpenseGrid() {
+    const incomeRows = state.incomes.slice().sort((a, b) => a.date.localeCompare(b.date))
+      .map(i => [i.date, i.source || "", i.amount]);
+    const expenseRows = state.expenses.slice().sort((a, b) => a.date.localeCompare(b.date))
+      .map(e => [e.date, e.category || "", e.amount]);
+    const rowCount = Math.max(incomeRows.length, expenseRows.length);
+
+    const grid = [
+      ["収入", "", "", "", "支出", "", ""],
+      ["日付", "内容", "金額", "", "日付", "内容", "金額"],
+    ];
+    for (let i = 0; i < rowCount; i++) {
+      const inc = incomeRows[i] || ["", "", ""];
+      const exp = expenseRows[i] || ["", "", ""];
+      grid.push([...inc, "", ...exp]);
+    }
+    const totalIncome = state.incomes.reduce((s, i) => s + i.amount, 0);
+    const totalExpense = state.expenses.reduce((s, e) => s + e.amount, 0);
+    grid.push(["合計", "", totalIncome, "", "合計", "", totalExpense]);
+    return grid;
+  }
+
+  /** 取引タブを、今わかっている収入・支出の全データから毎回まるごと再生成する(収入・支出を左右に分けて表示) */
+  async function syncTransactionsSheet(token) {
+    const rows = buildIncomeExpenseGrid();
+    await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}/values/${encodeURIComponent(SHEET_TX + "!A1:G3000")}:clear`,
+      { method: "POST", headers: { Authorization: `Bearer ${token}` } }
+    );
+    const res = await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}/values/${encodeURIComponent(SHEET_TX + "!A1")}?valueInputOption=USER_ENTERED`,
+      { method: "PUT", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify({ values: rows }) }
+    );
+    if (!res.ok) throw new Error(`transactions update failed: ${res.status}`);
+  }
+
   /** サインイン後や月次同期のたびに呼ぶ: 旧英語表記の移行・気持ち/サマリータブの用意までまとめて行う */
   async function ensureModernSheetLayout(token) {
     await migrateSheetNamesIfNeeded(token);
@@ -1582,6 +1620,30 @@
     ];
   }
 
+  /** 取引タブ専用: 収入(A〜C列・緑)と支出(E〜G列・赤)を左右に分けた2段見出しの色付けリクエストを作る */
+  function transactionsHeaderStyleRequests(sheetId) {
+    const bandCell = (bg, fg) => ({
+      userEnteredFormat: {
+        backgroundColor: bg,
+        textFormat: { bold: true, fontSize: 11, foregroundColor: fg },
+        horizontalAlignment: "CENTER",
+        verticalAlignment: "MIDDLE",
+      },
+    });
+    const fields = "userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,verticalAlignment)";
+    const white = { red: 1, green: 1, blue: 1 };
+    return [
+      { repeatCell: { range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: 3 }, cell: bandCell({ red: 0.24, green: 0.62, blue: 0.38 }, white), fields } },
+      { repeatCell: { range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 4, endColumnIndex: 7 }, cell: bandCell({ red: 0.85, green: 0.29, blue: 0.22 }, white), fields } },
+      { repeatCell: { range: { sheetId, startRowIndex: 1, endRowIndex: 2, startColumnIndex: 0, endColumnIndex: 3 }, cell: bandCell({ red: 0.86, green: 0.96, blue: 0.89 }, { red: 0.11, green: 0.35, blue: 0.19 }), fields } },
+      { repeatCell: { range: { sheetId, startRowIndex: 1, endRowIndex: 2, startColumnIndex: 4, endColumnIndex: 7 }, cell: bandCell({ red: 1, green: 0.9, blue: 0.88 }, { red: 0.5, green: 0.1, blue: 0.06 }), fields } },
+      { updateSheetProperties: { properties: { sheetId, gridProperties: { frozenRowCount: 2 } }, fields: "gridProperties.frozenRowCount" } },
+      { updateDimensionProperties: { range: { sheetId, dimension: "COLUMNS", startIndex: 0, endIndex: 3 }, properties: { pixelSize: 130 }, fields: "pixelSize" } },
+      { updateDimensionProperties: { range: { sheetId, dimension: "COLUMNS", startIndex: 3, endIndex: 4 }, properties: { pixelSize: 24 }, fields: "pixelSize" } },
+      { updateDimensionProperties: { range: { sheetId, dimension: "COLUMNS", startIndex: 4, endIndex: 7 }, properties: { pixelSize: 130 }, fields: "pixelSize" } },
+    ];
+  }
+
   /** 見やすいデザインに整える: ヘッダーの色付け・見出し固定・列幅に加えて、
    *  Transactionsシートは収入=緑/支出=赤の行に、Moodsシートは1行おきの帯色をつける。
    *  帯・条件付き書式は重複登録を避けるため googleSheetStyled フラグで一度だけ実行する。 */
@@ -1592,39 +1654,11 @@
     const summary = props[SHEET_SUMMARY];
     const requests = [];
 
-    if (tx) requests.push(...headerStyleRequests(tx.sheetId, 4));
+    if (tx) requests.push(...transactionsHeaderStyleRequests(tx.sheetId));
     if (moods) requests.push(...headerStyleRequests(moods.sheetId, 2));
     if (summary) requests.push(...headerStyleRequests(summary.sheetId, 4));
 
     if (!state.googleSheetStyled) {
-      if (tx) {
-        requests.push(
-          {
-            addConditionalFormatRule: {
-              rule: {
-                ranges: [{ sheetId: tx.sheetId, startRowIndex: 1, startColumnIndex: 0, endColumnIndex: 4 }],
-                booleanRule: {
-                  condition: { type: "CUSTOM_FORMULA", values: [{ userEnteredValue: `=$B2="${TYPE_INCOME}"` }] },
-                  format: { backgroundColor: { red: 0.86, green: 0.96, blue: 0.89 } },
-                },
-              },
-              index: 0,
-            },
-          },
-          {
-            addConditionalFormatRule: {
-              rule: {
-                ranges: [{ sheetId: tx.sheetId, startRowIndex: 1, startColumnIndex: 0, endColumnIndex: 4 }],
-                booleanRule: {
-                  condition: { type: "CUSTOM_FORMULA", values: [{ userEnteredValue: `=$B2="${TYPE_EXPENSE}"` }] },
-                  format: { backgroundColor: { red: 1, green: 0.9, blue: 0.88 } },
-                },
-              },
-              index: 0,
-            },
-          }
-        );
-      }
       if (moods) {
         requests.push({
           addBanding: {
@@ -1685,16 +1719,6 @@
     return { successCount, remaining: pending.length - successCount };
   }
 
-  function buildMonthTransactionRows(year, month) {
-    const incomeRows = state.incomes
-      .filter(i => { const d = parseDateKey(i.date); return d.getFullYear() === year && d.getMonth() === month; })
-      .map(i => [i.date, TYPE_INCOME, i.amount, i.source || ""]);
-    const expenseRows = state.expenses
-      .filter(e => { const d = parseDateKey(e.date); return d.getFullYear() === year && d.getMonth() === month; })
-      .map(e => [e.date, TYPE_EXPENSE, -e.amount, e.category || ""]);
-    return [...incomeRows, ...expenseRows].sort((a, b) => a[0].localeCompare(b[0]));
-  }
-
   async function syncMonthToGoogleSheets(year, month, { interactive } = {}) {
     if (!state.googleClientId) return { ok: false, reason: "no-client-id" };
     const token = await requestGoogleToken(!!interactive);
@@ -1703,12 +1727,11 @@
     try {
       await ensureSpreadsheet(token);
       await ensureModernSheetLayout(token);
-      const rows = buildMonthTransactionRows(year, month);
-      if (rows.length > 0) await appendRowsToRange(token, `${SHEET_TX}!A:D`, rows);
+      await syncTransactionsSheet(token);
       await syncSummarySheet(token);
       state.lastSyncedMonth = monthKeyNum(year, month);
       saveState();
-      return { ok: true, rowCount: rows.length };
+      return { ok: true, rowCount: state.incomes.length + state.expenses.length };
     } catch (e) {
       console.error("Google Sheets sync failed", e);
       return { ok: false, reason: "api-error" };
@@ -1774,7 +1797,7 @@
     updateGoogleStatusUI();
     renderEmotionLog();
     if (monthResult.ok) {
-      showGoogleFeedback(`Sent ${monthResult.rowCount} transaction(s) and ${emotionResult.successCount} mood entries`);
+      showGoogleFeedback(`Sheet updated (${monthResult.rowCount} transaction(s) total) and ${emotionResult.successCount} mood entries sent`);
     } else {
       showGoogleFeedback("Sync failed. Check your Client ID and sign-in status.");
     }
