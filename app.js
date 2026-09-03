@@ -1420,32 +1420,8 @@
       if (!renameRes.ok) throw new Error(`rename sheets failed: ${renameRes.status}`);
     }
 
-    if (sheetsByTitle["Transactions"]) {
-      await fetch(
-        `https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}/values/${encodeURIComponent(SHEET_TX + "!A1:D1")}?valueInputOption=USER_ENTERED`,
-        { method: "PUT", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify({ values: [["日付", "種類", "金額", "内容"]] }) }
-      );
-      // 既存データ行の「種類」列(Income/Expense)を日本語に置き換える
-      const valuesRes = await fetch(
-        `https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}/values/${encodeURIComponent(SHEET_TX + "!B2:B1000")}`,
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      if (valuesRes.ok) {
-        const valuesData = await valuesRes.json();
-        const colB = (valuesData.values || []).map(row => {
-          const v = row[0];
-          if (v === "Income") return [TYPE_INCOME];
-          if (v === "Expense") return [TYPE_EXPENSE];
-          return [v ?? ""];
-        });
-        if (colB.length > 0) {
-          await fetch(
-            `https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}/values/${encodeURIComponent(SHEET_TX + "!B2:B" + (colB.length + 1))}?valueInputOption=USER_ENTERED`,
-            { method: "PUT", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify({ values: colB }) }
-          );
-        }
-      }
-    }
+    // 取引タブの中身(見出し・データ)は syncTransactionsSheet が毎回まるごと再生成するので、
+    // ここではタブ名のリネームだけ行えば十分。
     if (sheetsByTitle["Moods"]) {
       await fetch(
         `https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}/values/${encodeURIComponent(SHEET_MOODS + "!A1:B1")}?valueInputOption=USER_ENTERED`,
@@ -1525,7 +1501,7 @@
     const rowCount = Math.max(incomeRows.length, expenseRows.length);
 
     const grid = [
-      ["収入", "", "", "", "支出", "", ""],
+      [TYPE_INCOME, "", "", "", TYPE_EXPENSE, "", ""],
       ["日付", "内容", "金額", "", "日付", "内容", "金額"],
     ];
     for (let i = 0; i < rowCount; i++) {
@@ -1777,6 +1753,7 @@
     try {
       await ensureSpreadsheet(token);
       await ensureModernSheetLayout(token);
+      await syncTransactionsSheet(token);
       await syncSummarySheet(token);
       await applySheetFormatting(token);
       updateGoogleStatusUI();
@@ -1812,6 +1789,7 @@
     if (!token) { btn.disabled = false; showGoogleFeedback("Google sign-in failed"); return; }
     try {
       await ensureModernSheetLayout(token);
+      await syncTransactionsSheet(token);
       await syncSummarySheet(token);
       await applySheetFormatting(token);
       showGoogleFeedback("Sheet updated — Japanese labels, summary tab, and colors applied");
