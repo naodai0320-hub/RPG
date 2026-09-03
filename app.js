@@ -16,7 +16,7 @@
       todayTasks: [], emotionLogs: [],
       lastSeenReportMonth: null,
       googleClientId: null, googleSpreadsheetId: null, googleFeelingsSheetReady: false, lastSyncedMonth: null,
-      googleSheetStyled: false,
+      googleSheetStyled: false, googleSummarySheetReady: false, googleSheetMigratedJa: false,
     };
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
@@ -35,6 +35,8 @@
         googleFeelingsSheetReady: parsed.googleFeelingsSheetReady ?? false,
         lastSyncedMonth: parsed.lastSyncedMonth ?? null,
         googleSheetStyled: parsed.googleSheetStyled ?? false,
+        googleSummarySheetReady: parsed.googleSummarySheetReady ?? false,
+        googleSheetMigratedJa: parsed.googleSheetMigratedJa ?? false,
       };
     } catch (e) {
       console.error("state load failed", e);
@@ -186,6 +188,8 @@
           googleFeelingsSheetReady: parsed.googleFeelingsSheetReady ?? false,
           lastSyncedMonth: parsed.lastSyncedMonth ?? null,
           googleSheetStyled: parsed.googleSheetStyled ?? false,
+          googleSummarySheetReady: parsed.googleSummarySheetReady ?? false,
+          googleSheetMigratedJa: parsed.googleSheetMigratedJa ?? false,
         };
         saveState();
         showBackupFeedback("Backup restored. Reloading…");
@@ -1249,6 +1253,13 @@
   // Google Sheets 連携(収入・支出の取引明細を月ごとに自動送信)
   // ---------------------------------------------------------------------
   const GOOGLE_SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets";
+  // Google Sheets側の表記は日本語で統一する(アプリ本体のUIは英語のまま)
+  const SPREADSHEET_TITLE = "成長クエスト家計簿";
+  const SHEET_TX = "取引";
+  const SHEET_MOODS = "気持ち";
+  const SHEET_SUMMARY = "サマリー";
+  const TYPE_INCOME = "収入";
+  const TYPE_EXPENSE = "支出";
   let googleTokenClient = null;
   let googleAccessToken = null;
   let googleTokenExpiresAt = 0;
@@ -1309,17 +1320,24 @@
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify({
-        properties: { title: "Growth Quest Finances" },
-        sheets: [{ properties: { title: "Transactions" } }, { properties: { title: "Moods" } }],
+        properties: { title: SPREADSHEET_TITLE },
+        sheets: [
+          { properties: { title: SHEET_SUMMARY } },
+          { properties: { title: SHEET_TX } },
+          { properties: { title: SHEET_MOODS } },
+        ],
       }),
     });
     if (!res.ok) throw new Error(`create spreadsheet failed: ${res.status}`);
     const data = await res.json();
     state.googleSpreadsheetId = data.spreadsheetId;
     state.googleFeelingsSheetReady = true;
+    state.googleSummarySheetReady = true;
+    state.googleSheetMigratedJa = true; // 最初から日本語表記で作成しているので移行不要
     saveState();
-    await appendRowsToRange(token, "Transactions!A:D", [["Date", "Type", "Amount", "Detail"]]);
-    await appendRowsToRange(token, "Moods!A:B", [["Timestamp", "Entry"]]);
+    await appendRowsToRange(token, `${SHEET_TX}!A:D`, [["日付", "種類", "金額", "内容"]]);
+    await appendRowsToRange(token, `${SHEET_MOODS}!A:B`, [["日時", "内容"]]);
+    try { await syncSummarySheet(token); } catch (e) { console.error("initial summary failed", e); }
     try { await applySheetFormatting(token); } catch (e) { console.error("initial sheet styling failed", e); }
     return state.googleSpreadsheetId;
   }
@@ -1334,18 +1352,174 @@
     );
     if (!metaRes.ok) throw new Error(`get spreadsheet meta failed: ${metaRes.status}`);
     const meta = await metaRes.json();
-    const hasFeelingsSheet = (meta.sheets || []).some(s => s.properties.title === "Moods");
+    const hasFeelingsSheet = (meta.sheets || []).some(s => s.properties.title === SHEET_MOODS || s.properties.title === "Moods");
     if (!hasFeelingsSheet) {
       const batchRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}:batchUpdate`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ requests: [{ addSheet: { properties: { title: "Moods" } } }] }),
+        body: JSON.stringify({ requests: [{ addSheet: { properties: { title: SHEET_MOODS } } }] }),
       });
       if (!batchRes.ok) throw new Error(`add feelings sheet failed: ${batchRes.status}`);
-      await appendRowsToRange(token, "Moods!A:B", [["Timestamp", "Entry"]]);
+      await appendRowsToRange(token, `${SHEET_MOODS}!A:B`, [["日時", "内容"]]);
     }
     state.googleFeelingsSheetReady = true;
     saveState();
+  }
+
+  /** サマリータブがまだ無ければ、一番左のタブとして追加する */
+  async function ensureSummarySheetTab(token) {
+    if (state.googleSummarySheetReady) return;
+    const metaRes = await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}?fields=sheets.properties.title`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    if (!metaRes.ok) throw new Error(`get spreadsheet meta failed: ${metaRes.status}`);
+    const meta = await metaRes.json();
+    const hasSummary = (meta.sheets || []).some(s => s.properties.title === SHEET_SUMMARY);
+    if (!hasSummary) {
+      const batchRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}:batchUpdate`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ requests: [{ addSheet: { properties: { title: SHEET_SUMMARY, index: 0 } } }] }),
+      });
+      if (!batchRes.ok) throw new Error(`add summary sheet failed: ${batchRes.status}`);
+    }
+    state.googleSummarySheetReady = true;
+    saveState();
+  }
+
+  /** 古い英語表記(Transactions/Moods/Growth Quest Finances)で作られた既存のスプレッドシートを、
+   *  タブ名・ヘッダー・種類の値(Income/Expense)ごと日本語に置き換える。一度だけ実行すればよい移行処理。 */
+  async function migrateSheetNamesIfNeeded(token) {
+    if (state.googleSheetMigratedJa) return;
+    const metaRes = await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}?fields=properties.title,sheets.properties(sheetId,title)`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    if (!metaRes.ok) throw new Error(`get spreadsheet meta failed: ${metaRes.status}`);
+    const meta = await metaRes.json();
+    const sheetsByTitle = {};
+    (meta.sheets || []).forEach(s => { sheetsByTitle[s.properties.title] = s.properties; });
+
+    const renameRequests = [];
+    if (sheetsByTitle["Transactions"]) {
+      renameRequests.push({ updateSheetProperties: { properties: { sheetId: sheetsByTitle["Transactions"].sheetId, title: SHEET_TX }, fields: "title" } });
+    }
+    if (sheetsByTitle["Moods"]) {
+      renameRequests.push({ updateSheetProperties: { properties: { sheetId: sheetsByTitle["Moods"].sheetId, title: SHEET_MOODS }, fields: "title" } });
+    }
+    if (meta.properties && meta.properties.title !== SPREADSHEET_TITLE) {
+      renameRequests.push({ updateSpreadsheetProperties: { properties: { title: SPREADSHEET_TITLE }, fields: "title" } });
+    }
+    if (renameRequests.length > 0) {
+      const renameRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}:batchUpdate`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ requests: renameRequests }),
+      });
+      if (!renameRes.ok) throw new Error(`rename sheets failed: ${renameRes.status}`);
+    }
+
+    if (sheetsByTitle["Transactions"]) {
+      await fetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}/values/${encodeURIComponent(SHEET_TX + "!A1:D1")}?valueInputOption=USER_ENTERED`,
+        { method: "PUT", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify({ values: [["日付", "種類", "金額", "内容"]] }) }
+      );
+      // 既存データ行の「種類」列(Income/Expense)を日本語に置き換える
+      const valuesRes = await fetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}/values/${encodeURIComponent(SHEET_TX + "!B2:B1000")}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (valuesRes.ok) {
+        const valuesData = await valuesRes.json();
+        const colB = (valuesData.values || []).map(row => {
+          const v = row[0];
+          if (v === "Income") return [TYPE_INCOME];
+          if (v === "Expense") return [TYPE_EXPENSE];
+          return [v ?? ""];
+        });
+        if (colB.length > 0) {
+          await fetch(
+            `https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}/values/${encodeURIComponent(SHEET_TX + "!B2:B" + (colB.length + 1))}?valueInputOption=USER_ENTERED`,
+            { method: "PUT", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify({ values: colB }) }
+          );
+        }
+      }
+    }
+    if (sheetsByTitle["Moods"]) {
+      await fetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}/values/${encodeURIComponent(SHEET_MOODS + "!A1:B1")}?valueInputOption=USER_ENTERED`,
+        { method: "PUT", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify({ values: [["日時", "内容"]] }) }
+      );
+    }
+
+    state.googleSheetMigratedJa = true;
+    saveState();
+  }
+
+  /** 収入・支出を月別/年別/全期間で集計し、サマリータブの中身をまるごと書き直す */
+  function buildSummaryRows() {
+    const monthMap = new Map();
+    const yearMap = new Map();
+    const addTo = (map, key, income, expense, extra) => {
+      const cur = map.get(key) || { income: 0, expense: 0, ...extra };
+      cur.income += income;
+      cur.expense += expense;
+      map.set(key, cur);
+    };
+    state.incomes.forEach(i => {
+      const d = parseDateKey(i.date);
+      const y = d.getFullYear(), m = d.getMonth();
+      addTo(monthMap, `${y}-${pad2(m + 1)}`, i.amount, 0, { year: y, month: m });
+      addTo(yearMap, y, i.amount, 0, {});
+    });
+    state.expenses.forEach(e => {
+      const d = parseDateKey(e.date);
+      const y = d.getFullYear(), m = d.getMonth();
+      addTo(monthMap, `${y}-${pad2(m + 1)}`, 0, e.amount, { year: y, month: m });
+      addTo(yearMap, y, 0, e.amount, {});
+    });
+
+    const monthRows = [...monthMap.keys()].sort().map(k => {
+      const v = monthMap.get(k);
+      return [`${v.year}年${v.month + 1}月`, v.income, v.expense, v.income - v.expense];
+    });
+    const yearRows = [...yearMap.keys()].sort((a, b) => a - b).map(y => {
+      const v = yearMap.get(y);
+      return [`${y}年 合計`, v.income, v.expense, v.income - v.expense];
+    });
+    const totalIncome = state.incomes.reduce((s, i) => s + i.amount, 0);
+    const totalExpense = state.expenses.reduce((s, e) => s + e.amount, 0);
+
+    const rows = [["年月", "収入", "支出", "差額"]];
+    rows.push(...monthRows);
+    rows.push(["", "", "", ""]);
+    rows.push(["年別合計", "", "", ""]);
+    rows.push(...yearRows);
+    rows.push(["", "", "", ""]);
+    rows.push(["全期間合計", totalIncome, totalExpense, totalIncome - totalExpense]);
+    return rows;
+  }
+
+  /** サマリータブを、今わかっている収入・支出の全データから毎回まるごと再生成する */
+  async function syncSummarySheet(token) {
+    const rows = buildSummaryRows();
+    await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}/values/${encodeURIComponent(SHEET_SUMMARY + "!A1:D1000")}:clear`,
+      { method: "POST", headers: { Authorization: `Bearer ${token}` } }
+    );
+    const res = await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}/values/${encodeURIComponent(SHEET_SUMMARY + "!A1")}?valueInputOption=USER_ENTERED`,
+      { method: "PUT", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify({ values: rows }) }
+    );
+    if (!res.ok) throw new Error(`summary update failed: ${res.status}`);
+  }
+
+  /** サインイン後や月次同期のたびに呼ぶ: 旧英語表記の移行・気持ち/サマリータブの用意までまとめて行う */
+  async function ensureModernSheetLayout(token) {
+    await migrateSheetNamesIfNeeded(token);
+    await ensureFeelingsSheetTab(token);
+    await ensureSummarySheetTab(token);
   }
 
   async function appendRowsToRange(token, sheetRange, rows) {
@@ -1413,12 +1587,14 @@
    *  帯・条件付き書式は重複登録を避けるため googleSheetStyled フラグで一度だけ実行する。 */
   async function applySheetFormatting(token) {
     const props = await getSheetPropertiesMap(token);
-    const tx = props["Transactions"];
-    const moods = props["Moods"];
+    const tx = props[SHEET_TX];
+    const moods = props[SHEET_MOODS];
+    const summary = props[SHEET_SUMMARY];
     const requests = [];
 
     if (tx) requests.push(...headerStyleRequests(tx.sheetId, 4));
     if (moods) requests.push(...headerStyleRequests(moods.sheetId, 2));
+    if (summary) requests.push(...headerStyleRequests(summary.sheetId, 4));
 
     if (!state.googleSheetStyled) {
       if (tx) {
@@ -1428,7 +1604,7 @@
               rule: {
                 ranges: [{ sheetId: tx.sheetId, startRowIndex: 1, startColumnIndex: 0, endColumnIndex: 4 }],
                 booleanRule: {
-                  condition: { type: "CUSTOM_FORMULA", values: [{ userEnteredValue: '=$B2="Income"' }] },
+                  condition: { type: "CUSTOM_FORMULA", values: [{ userEnteredValue: `=$B2="${TYPE_INCOME}"` }] },
                   format: { backgroundColor: { red: 0.86, green: 0.96, blue: 0.89 } },
                 },
               },
@@ -1440,7 +1616,7 @@
               rule: {
                 ranges: [{ sheetId: tx.sheetId, startRowIndex: 1, startColumnIndex: 0, endColumnIndex: 4 }],
                 booleanRule: {
-                  condition: { type: "CUSTOM_FORMULA", values: [{ userEnteredValue: '=$B2="Expense"' }] },
+                  condition: { type: "CUSTOM_FORMULA", values: [{ userEnteredValue: `=$B2="${TYPE_EXPENSE}"` }] },
                   format: { backgroundColor: { red: 1, green: 0.9, blue: 0.88 } },
                 },
               },
@@ -1484,10 +1660,10 @@
 
     try {
       await ensureSpreadsheet(token);
-      await ensureFeelingsSheetTab(token);
+      await ensureModernSheetLayout(token);
       const d = new Date(entry.createdAt);
       const timestamp = `${entry.date} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
-      await appendRowsToRange(token, "Moods!A:B", [[timestamp, entry.text]]);
+      await appendRowsToRange(token, `${SHEET_MOODS}!A:B`, [[timestamp, entry.text]]);
       return { ok: true };
     } catch (e) {
       console.error("emotion sync failed", e);
@@ -1512,10 +1688,10 @@
   function buildMonthTransactionRows(year, month) {
     const incomeRows = state.incomes
       .filter(i => { const d = parseDateKey(i.date); return d.getFullYear() === year && d.getMonth() === month; })
-      .map(i => [i.date, "Income", i.amount, i.source || ""]);
+      .map(i => [i.date, TYPE_INCOME, i.amount, i.source || ""]);
     const expenseRows = state.expenses
       .filter(e => { const d = parseDateKey(e.date); return d.getFullYear() === year && d.getMonth() === month; })
-      .map(e => [e.date, "Expense", -e.amount, e.category || ""]);
+      .map(e => [e.date, TYPE_EXPENSE, -e.amount, e.category || ""]);
     return [...incomeRows, ...expenseRows].sort((a, b) => a[0].localeCompare(b[0]));
   }
 
@@ -1526,8 +1702,10 @@
 
     try {
       await ensureSpreadsheet(token);
+      await ensureModernSheetLayout(token);
       const rows = buildMonthTransactionRows(year, month);
-      if (rows.length > 0) await appendRowsToRange(token, "Transactions!A:D", rows);
+      if (rows.length > 0) await appendRowsToRange(token, `${SHEET_TX}!A:D`, rows);
+      await syncSummarySheet(token);
       state.lastSyncedMonth = monthKeyNum(year, month);
       saveState();
       return { ok: true, rowCount: rows.length };
@@ -1575,7 +1753,9 @@
     if (!token) { showGoogleFeedback("Google sign-in failed. Check for a blocked popup or an incorrect Client ID."); return; }
     try {
       await ensureSpreadsheet(token);
-      await ensureFeelingsSheetTab(token);
+      await ensureModernSheetLayout(token);
+      await syncSummarySheet(token);
+      await applySheetFormatting(token);
       updateGoogleStatusUI();
       showGoogleFeedback("Signed in — your spreadsheet is ready");
     } catch (e) {
@@ -1608,8 +1788,10 @@
     const token = await requestGoogleToken(true);
     if (!token) { btn.disabled = false; showGoogleFeedback("Google sign-in failed"); return; }
     try {
+      await ensureModernSheetLayout(token);
+      await syncSummarySheet(token);
       await applySheetFormatting(token);
-      showGoogleFeedback("Sheet styled — colors, headers, and freeze applied");
+      showGoogleFeedback("Sheet updated — Japanese labels, summary tab, and colors applied");
     } catch (e) {
       console.error("format sheet failed", e);
       showGoogleFeedback("Couldn't style the sheet. Try again in a moment.");
