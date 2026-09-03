@@ -16,6 +16,7 @@
       todayTasks: [], emotionLogs: [],
       lastSeenReportMonth: null,
       googleClientId: null, googleSpreadsheetId: null, googleFeelingsSheetReady: false, lastSyncedMonth: null,
+      googleSheetStyled: false,
     };
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
@@ -33,6 +34,7 @@
         googleSpreadsheetId: parsed.googleSpreadsheetId ?? null,
         googleFeelingsSheetReady: parsed.googleFeelingsSheetReady ?? false,
         lastSyncedMonth: parsed.lastSyncedMonth ?? null,
+        googleSheetStyled: parsed.googleSheetStyled ?? false,
       };
     } catch (e) {
       console.error("state load failed", e);
@@ -183,6 +185,7 @@
           googleSpreadsheetId: parsed.googleSpreadsheetId ?? null,
           googleFeelingsSheetReady: parsed.googleFeelingsSheetReady ?? false,
           lastSyncedMonth: parsed.lastSyncedMonth ?? null,
+          googleSheetStyled: parsed.googleSheetStyled ?? false,
         };
         saveState();
         showBackupFeedback("Backup restored. Reloading…");
@@ -1317,6 +1320,7 @@
     saveState();
     await appendRowsToRange(token, "Transactions!A:D", [["Date", "Type", "Amount", "Detail"]]);
     await appendRowsToRange(token, "Moods!A:B", [["Timestamp", "Entry"]]);
+    try { await applySheetFormatting(token); } catch (e) { console.error("initial sheet styling failed", e); }
     return state.googleSpreadsheetId;
   }
 
@@ -1356,6 +1360,119 @@
     );
     if (!res.ok) throw new Error(`append failed: ${res.status}`);
     return res.json();
+  }
+
+  /** シートのタイトル→properties(sheetId, gridProperties 等)のマップを取得する */
+  async function getSheetPropertiesMap(token) {
+    const res = await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}?fields=sheets.properties(sheetId,title,gridProperties)`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    if (!res.ok) throw new Error(`get spreadsheet meta failed: ${res.status}`);
+    const meta = await res.json();
+    const map = {};
+    (meta.sheets || []).forEach(s => { map[s.properties.title] = s.properties; });
+    return map;
+  }
+
+  /** ヘッダー行の色付け・固定・列幅を整える(何度呼んでも安全)リクエストを作る */
+  function headerStyleRequests(sheetId, columnCount) {
+    return [
+      {
+        repeatCell: {
+          range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: columnCount },
+          cell: {
+            userEnteredFormat: {
+              backgroundColor: { red: 1, green: 0.427, blue: 0.161 },
+              textFormat: { bold: true, fontSize: 11, foregroundColor: { red: 1, green: 1, blue: 1 } },
+              horizontalAlignment: "CENTER",
+              verticalAlignment: "MIDDLE",
+            },
+          },
+          fields: "userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,verticalAlignment)",
+        },
+      },
+      {
+        updateSheetProperties: {
+          properties: { sheetId, gridProperties: { frozenRowCount: 1 } },
+          fields: "gridProperties.frozenRowCount",
+        },
+      },
+      {
+        updateDimensionProperties: {
+          range: { sheetId, dimension: "COLUMNS", startIndex: 0, endIndex: columnCount },
+          properties: { pixelSize: 150 },
+          fields: "pixelSize",
+        },
+      },
+    ];
+  }
+
+  /** 見やすいデザインに整える: ヘッダーの色付け・見出し固定・列幅に加えて、
+   *  Transactionsシートは収入=緑/支出=赤の行に、Moodsシートは1行おきの帯色をつける。
+   *  帯・条件付き書式は重複登録を避けるため googleSheetStyled フラグで一度だけ実行する。 */
+  async function applySheetFormatting(token) {
+    const props = await getSheetPropertiesMap(token);
+    const tx = props["Transactions"];
+    const moods = props["Moods"];
+    const requests = [];
+
+    if (tx) requests.push(...headerStyleRequests(tx.sheetId, 4));
+    if (moods) requests.push(...headerStyleRequests(moods.sheetId, 2));
+
+    if (!state.googleSheetStyled) {
+      if (tx) {
+        requests.push(
+          {
+            addConditionalFormatRule: {
+              rule: {
+                ranges: [{ sheetId: tx.sheetId, startRowIndex: 1, startColumnIndex: 0, endColumnIndex: 4 }],
+                booleanRule: {
+                  condition: { type: "CUSTOM_FORMULA", values: [{ userEnteredValue: '=$B2="Income"' }] },
+                  format: { backgroundColor: { red: 0.86, green: 0.96, blue: 0.89 } },
+                },
+              },
+              index: 0,
+            },
+          },
+          {
+            addConditionalFormatRule: {
+              rule: {
+                ranges: [{ sheetId: tx.sheetId, startRowIndex: 1, startColumnIndex: 0, endColumnIndex: 4 }],
+                booleanRule: {
+                  condition: { type: "CUSTOM_FORMULA", values: [{ userEnteredValue: '=$B2="Expense"' }] },
+                  format: { backgroundColor: { red: 1, green: 0.9, blue: 0.88 } },
+                },
+              },
+              index: 0,
+            },
+          }
+        );
+      }
+      if (moods) {
+        requests.push({
+          addBanding: {
+            bandedRange: {
+              range: { sheetId: moods.sheetId, startRowIndex: 1, startColumnIndex: 0, endColumnIndex: 2 },
+              rowProperties: {
+                firstBandColor: { red: 1, green: 1, blue: 1 },
+                secondBandColor: { red: 1, green: 0.96, blue: 0.92 },
+              },
+            },
+          },
+        });
+      }
+    }
+
+    if (requests.length === 0) return;
+    const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}:batchUpdate`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ requests }),
+    });
+    if (!res.ok) throw new Error(`format sheet failed: ${res.status}`);
+    state.googleSheetStyled = true;
+    saveState();
   }
 
   /** 「今日の気持ち」を記録した瞬間にGoogle Sheetsへ即時保存する */
@@ -1483,11 +1600,29 @@
     }
   });
 
+  document.getElementById("google-format-btn").addEventListener("click", async () => {
+    if (!state.googleSpreadsheetId) { showGoogleFeedback("Sign in first so a spreadsheet exists"); return; }
+    const btn = document.getElementById("google-format-btn");
+    btn.disabled = true;
+    showGoogleFeedback("Styling sheet…");
+    const token = await requestGoogleToken(true);
+    if (!token) { btn.disabled = false; showGoogleFeedback("Google sign-in failed"); return; }
+    try {
+      await applySheetFormatting(token);
+      showGoogleFeedback("Sheet styled — colors, headers, and freeze applied");
+    } catch (e) {
+      console.error("format sheet failed", e);
+      showGoogleFeedback("Couldn't style the sheet. Try again in a moment.");
+    }
+    btn.disabled = false;
+  });
+
   document.getElementById("google-disconnect-btn").addEventListener("click", () => {
     state.googleClientId = null;
     state.googleSpreadsheetId = null;
     state.googleFeelingsSheetReady = false;
     state.lastSyncedMonth = null;
+    state.googleSheetStyled = false;
     googleTokenClient = null;
     googleAccessToken = null;
     saveState();
