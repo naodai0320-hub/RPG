@@ -128,8 +128,12 @@
         </div>
       </div>
 
-      <ul id="income-list" class="item-list"></ul>
-      <p id="income-empty" class="empty-note">No income yet this month. Add one above.</p>
+      <div class="ledger-card income-ledger">
+        <div class="ledger-head"><span>Date</span><span>Category</span><span>Amount</span></div>
+        <ul id="income-list" class="item-list"></ul>
+        <p id="income-empty" class="empty-note">No income yet this month. Add one above.</p>
+        <div class="ledger-total-row"><span>Total</span><span id="income-list-total">¥0</span></div>
+      </div>
 
       <div class="card">
         <h2>Daily Trend</h2>
@@ -169,8 +173,12 @@
         </div>
       </div>
 
-      <ul id="expense-list" class="item-list"></ul>
-      <p id="expense-empty" class="empty-note">No expenses yet this month. Add one above.</p>
+      <div class="ledger-card expense-ledger">
+        <div class="ledger-head"><span>Date</span><span>Category</span><span>Amount</span></div>
+        <ul id="expense-list" class="item-list"></ul>
+        <p id="expense-empty" class="empty-note">No expenses yet this month. Add one above.</p>
+        <div class="ledger-total-row"><span>Total</span><span id="expense-list-total">¥0</span></div>
+      </div>
 
       <div class="card">
         <h2>Daily Trend</h2>

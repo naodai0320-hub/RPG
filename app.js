@@ -712,10 +712,8 @@
       const d = parseDateKey(entry.date);
       const label = kind === "income" ? entry.source : entry.category;
       li.innerHTML = `
-        <div class="ledger-body">
-          <div class="ledger-date">${d.getMonth() + 1}/${d.getDate()}(${WEEKDAY_LABELS[d.getDay()]})</div>
-          <div class="ledger-source"></div>
-        </div>
+        <div class="ledger-date">${d.getMonth() + 1}/${d.getDate()}(${WEEKDAY_LABELS[d.getDay()]})</div>
+        <div class="ledger-source"></div>
         <div class="ledger-amount ${kind}-amount">${kind === "income" ? "+" : "-"}${formatYen(entry.amount)}</div>
       `;
       li.querySelector(".ledger-source").textContent = label || (kind === "income" ? "Income" : "Expense");
@@ -738,6 +736,7 @@
 
     const monthTotal = monthEntries.reduce((s, i) => s + i.amount, 0);
     document.getElementById("income-month-total-stat").textContent = formatYen(monthTotal);
+    document.getElementById("income-list-total").textContent = formatYen(monthTotal);
 
     const yearEntries = state.incomes.filter(i => parseDateKey(i.date).getFullYear() === incomeView.year);
     const yearTotal = yearEntries.reduce((s, i) => s + i.amount, 0);
@@ -861,6 +860,7 @@
 
     const monthTotal = monthEntries.reduce((s, e) => s + e.amount, 0);
     document.getElementById("expense-month-total-stat").textContent = formatYen(monthTotal);
+    document.getElementById("expense-list-total").textContent = formatYen(monthTotal);
 
     const yearEntries = state.expenses.filter(e => parseDateKey(e.date).getFullYear() === expenseView.year);
     const yearTotal = yearEntries.reduce((s, e) => s + e.amount, 0);
