@@ -17,6 +17,7 @@
       lastSeenReportMonth: null,
       googleClientId: null, googleSpreadsheetId: null, googleFeelingsSheetReady: false, lastSyncedMonth: null,
       googleSheetStyled: false, googleSummarySheetReady: false, googleSheetMigratedJa: false,
+      googleTxSplitByMonth: false,
     };
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
@@ -37,6 +38,7 @@
         googleSheetStyled: parsed.googleSheetStyled ?? false,
         googleSummarySheetReady: parsed.googleSummarySheetReady ?? false,
         googleSheetMigratedJa: parsed.googleSheetMigratedJa ?? false,
+        googleTxSplitByMonth: parsed.googleTxSplitByMonth ?? false,
       };
     } catch (e) {
       console.error("state load failed", e);
@@ -190,6 +192,7 @@
           googleSheetStyled: parsed.googleSheetStyled ?? false,
           googleSummarySheetReady: parsed.googleSummarySheetReady ?? false,
           googleSheetMigratedJa: parsed.googleSheetMigratedJa ?? false,
+          googleTxSplitByMonth: parsed.googleTxSplitByMonth ?? false,
         };
         saveState();
         showBackupFeedback("Backup restored. Reloading…");
@@ -1323,7 +1326,6 @@
         properties: { title: SPREADSHEET_TITLE },
         sheets: [
           { properties: { title: SHEET_SUMMARY } },
-          { properties: { title: SHEET_TX } },
           { properties: { title: SHEET_MOODS } },
         ],
       }),
@@ -1334,9 +1336,10 @@
     state.googleFeelingsSheetReady = true;
     state.googleSummarySheetReady = true;
     state.googleSheetMigratedJa = true; // 最初から日本語表記で作成しているので移行不要
+    state.googleTxSplitByMonth = true; // 最初から月ごとのタブで作成しているので移行不要
     saveState();
     await appendRowsToRange(token, `${SHEET_MOODS}!A:B`, [["日時", "内容"]]);
-    try { await syncTransactionsSheet(token); } catch (e) { console.error("initial transactions failed", e); }
+    try { const now = new Date(); await syncMonthTransactionsSheet(token, now.getFullYear(), now.getMonth()); } catch (e) { console.error("initial transactions failed", e); }
     try { await syncSummarySheet(token); } catch (e) { console.error("initial summary failed", e); }
     try { await applySheetFormatting(token); } catch (e) { console.error("initial sheet styling failed", e); }
     return state.googleSpreadsheetId;
@@ -1420,8 +1423,8 @@
       if (!renameRes.ok) throw new Error(`rename sheets failed: ${renameRes.status}`);
     }
 
-    // 取引タブの中身(見出し・データ)は syncTransactionsSheet が毎回まるごと再生成するので、
-    // ここではタブ名のリネームだけ行えば十分。
+    // 旧「取引」タブ自体は migrateToMonthlyTransactionTabs が月ごとのタブへの移行時に削除するので、
+    // ここではリネームだけ行えば十分。
     if (sheetsByTitle["Moods"]) {
       await fetch(
         `https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}/values/${encodeURIComponent(SHEET_MOODS + "!A1:B1")}?valueInputOption=USER_ENTERED`,
@@ -1492,11 +1495,11 @@
   }
 
   /** 収入(A〜C列)と支出(E〜G列)を左右に分けた2次元配列を組み立てる。
-   *  1行目=区分見出し、2行目=列見出し、以降データ、最終行=合計。 */
-  function buildIncomeExpenseGrid() {
-    const incomeRows = state.incomes.slice().sort((a, b) => a.date.localeCompare(b.date))
+   *  1行目=区分見出し、2行目=列見出し、以降データ、最終行=合計・差額。 */
+  function buildIncomeExpenseGrid(incomes, expenses) {
+    const incomeRows = incomes.slice().sort((a, b) => a.date.localeCompare(b.date))
       .map(i => [i.date, i.source || "", i.amount]);
-    const expenseRows = state.expenses.slice().sort((a, b) => a.date.localeCompare(b.date))
+    const expenseRows = expenses.slice().sort((a, b) => a.date.localeCompare(b.date))
       .map(e => [e.date, e.category || "", e.amount]);
     const rowCount = Math.max(incomeRows.length, expenseRows.length);
 
@@ -1509,25 +1512,101 @@
       const exp = expenseRows[i] || ["", "", ""];
       grid.push([...inc, "", ...exp]);
     }
-    const totalIncome = state.incomes.reduce((s, i) => s + i.amount, 0);
-    const totalExpense = state.expenses.reduce((s, e) => s + e.amount, 0);
+    const totalIncome = incomes.reduce((s, i) => s + i.amount, 0);
+    const totalExpense = expenses.reduce((s, e) => s + e.amount, 0);
     grid.push(["合計", "", totalIncome, "", "合計", "", totalExpense]);
     grid.push(["差額(収入-支出)", "", totalIncome - totalExpense, "", "", "", ""]);
     return grid;
   }
 
-  /** 取引タブを、今わかっている収入・支出の全データから毎回まるごと再生成する(収入・支出を左右に分けて表示) */
-  async function syncTransactionsSheet(token) {
-    const rows = buildIncomeExpenseGrid();
+  /** "2026年8月" のようなタブ名を作る */
+  function monthSheetTitle(year, month) { return `${year}年${month + 1}月`; }
+
+  /** 指定の年月の収入・支出だけを抜き出したグリッドを組み立てる */
+  function buildMonthGrid(year, month) {
+    const incomes = state.incomes.filter(i => { const d = parseDateKey(i.date); return d.getFullYear() === year && d.getMonth() === month; });
+    const expenses = state.expenses.filter(e => { const d = parseDateKey(e.date); return d.getFullYear() === year && d.getMonth() === month; });
+    return buildIncomeExpenseGrid(incomes, expenses);
+  }
+
+  /** 指定タブの中身(A1起点、G列まで)をまるごとクリアしてから書き直す */
+  async function writeGridToSheet(token, sheetTitle, grid) {
     await fetch(
-      `https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}/values/${encodeURIComponent(SHEET_TX + "!A1:G3000")}:clear`,
+      `https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}/values/${encodeURIComponent(sheetTitle + "!A1:G3000")}:clear`,
       { method: "POST", headers: { Authorization: `Bearer ${token}` } }
     );
     const res = await fetch(
-      `https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}/values/${encodeURIComponent(SHEET_TX + "!A1")}?valueInputOption=USER_ENTERED`,
-      { method: "PUT", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify({ values: rows }) }
+      `https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}/values/${encodeURIComponent(sheetTitle + "!A1")}?valueInputOption=USER_ENTERED`,
+      { method: "PUT", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify({ values: grid }) }
     );
-    if (!res.ok) throw new Error(`transactions update failed: ${res.status}`);
+    if (!res.ok) throw new Error(`sheet "${sheetTitle}" update failed: ${res.status}`);
+  }
+
+  /** 指定タブがまだ無ければ追加する(月ごとの取引タブ用) */
+  async function ensureNamedSheetTab(token, title) {
+    const metaRes = await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}?fields=sheets.properties.title`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    if (!metaRes.ok) throw new Error(`get spreadsheet meta failed: ${metaRes.status}`);
+    const meta = await metaRes.json();
+    const exists = (meta.sheets || []).some(s => s.properties.title === title);
+    if (!exists) {
+      const batchRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}:batchUpdate`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ requests: [{ addSheet: { properties: { title } } }] }),
+      });
+      if (!batchRes.ok) throw new Error(`add sheet "${title}" failed: ${batchRes.status}`);
+    }
+  }
+
+  /** 月ごとの取引タブに、ヘッダー色付け・見出し固定・合計行の強調を適用する */
+  async function styleNamedTransactionsSheet(token, title, grid) {
+    const props = await getSheetPropertiesMap(token);
+    const sheet = props[title];
+    if (!sheet) return;
+    const requests = transactionsHeaderStyleRequests(sheet.sheetId, grid.length - 2);
+    const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}:batchUpdate`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ requests }),
+    });
+    if (!res.ok) throw new Error(`style sheet "${title}" failed: ${res.status}`);
+  }
+
+  /** 指定の年月の取引タブを、用意→書き込み→色付けまでまとめて行う */
+  async function syncMonthTransactionsSheet(token, year, month) {
+    const title = monthSheetTitle(year, month);
+    await ensureNamedSheetTab(token, title);
+    const grid = buildMonthGrid(year, month);
+    await writeGridToSheet(token, title, grid);
+    await styleNamedTransactionsSheet(token, title, grid);
+    return title;
+  }
+
+  /** 旧レイアウト(収入・支出が1本の「取引」タブに混在)を使っていた場合、
+   *  既存データがある月ごとにタブを作り直し、古い「取引」タブは削除する。一度だけ実行すればよい移行処理。 */
+  async function migrateToMonthlyTransactionTabs(token) {
+    if (state.googleTxSplitByMonth) return;
+    const monthKeys = new Set();
+    state.incomes.forEach(i => { const d = parseDateKey(i.date); monthKeys.add(`${d.getFullYear()}-${d.getMonth()}`); });
+    state.expenses.forEach(e => { const d = parseDateKey(e.date); monthKeys.add(`${d.getFullYear()}-${d.getMonth()}`); });
+    for (const key of monthKeys) {
+      const [y, m] = key.split("-").map(Number);
+      await syncMonthTransactionsSheet(token, y, m);
+    }
+    const props = await getSheetPropertiesMap(token);
+    if (props[SHEET_TX]) {
+      const delRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}:batchUpdate`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ requests: [{ deleteSheet: { sheetId: props[SHEET_TX].sheetId } }] }),
+      });
+      if (!delRes.ok) throw new Error(`delete old transactions sheet failed: ${delRes.status}`);
+    }
+    state.googleTxSplitByMonth = true;
+    saveState();
   }
 
   /** サインイン後や月次同期のたびに呼ぶ: 旧英語表記の移行・気持ち/サマリータブの用意までまとめて行う */
@@ -1535,6 +1614,7 @@
     await migrateSheetNamesIfNeeded(token);
     await ensureFeelingsSheetTab(token);
     await ensureSummarySheetTab(token);
+    await migrateToMonthlyTransactionTabs(token);
   }
 
   async function appendRowsToRange(token, sheetRange, rows) {
@@ -1637,15 +1717,11 @@
    *  帯・条件付き書式は重複登録を避けるため googleSheetStyled フラグで一度だけ実行する。 */
   async function applySheetFormatting(token) {
     const props = await getSheetPropertiesMap(token);
-    const tx = props[SHEET_TX];
     const moods = props[SHEET_MOODS];
     const summary = props[SHEET_SUMMARY];
     const requests = [];
 
-    if (tx) {
-      const txRowCount = buildIncomeExpenseGrid().length;
-      requests.push(...transactionsHeaderStyleRequests(tx.sheetId, txRowCount - 2));
-    }
+    // 月ごとの取引タブは syncMonthTransactionsSheet 内で個別に色付けされるので、ここでは対象外
     if (moods) requests.push(...headerStyleRequests(moods.sheetId, 2));
     if (summary) requests.push(...headerStyleRequests(summary.sheetId, 4));
 
@@ -1718,7 +1794,7 @@
     try {
       await ensureSpreadsheet(token);
       await ensureModernSheetLayout(token);
-      await syncTransactionsSheet(token);
+      await syncMonthTransactionsSheet(token, year, month);
       await syncSummarySheet(token);
       state.lastSyncedMonth = monthKeyNum(year, month);
       saveState();
@@ -1768,7 +1844,8 @@
     try {
       await ensureSpreadsheet(token);
       await ensureModernSheetLayout(token);
-      await syncTransactionsSheet(token);
+      const now = new Date();
+      await syncMonthTransactionsSheet(token, now.getFullYear(), now.getMonth());
       await syncSummarySheet(token);
       await applySheetFormatting(token);
       updateGoogleStatusUI();
@@ -1804,7 +1881,8 @@
     if (!token) { btn.disabled = false; showGoogleFeedback("Google sign-in failed"); return; }
     try {
       await ensureModernSheetLayout(token);
-      await syncTransactionsSheet(token);
+      const now = new Date();
+      await syncMonthTransactionsSheet(token, now.getFullYear(), now.getMonth());
       await syncSummarySheet(token);
       await applySheetFormatting(token);
       showGoogleFeedback("Sheet updated — Japanese labels, summary tab, and colors applied");
@@ -1821,6 +1899,9 @@
     state.googleFeelingsSheetReady = false;
     state.lastSyncedMonth = null;
     state.googleSheetStyled = false;
+    state.googleSummarySheetReady = false;
+    state.googleSheetMigratedJa = false;
+    state.googleTxSplitByMonth = false;
     googleTokenClient = null;
     googleAccessToken = null;
     saveState();
