@@ -1340,7 +1340,10 @@
         finish(googleAccessToken);
       };
       try {
-        client.requestAccessToken({ prompt: interactive ? "consent" : "" });
+        // "consent" だと毎回フル同意画面を強制してしまい、短時間に何度も叩くとGoogle側の
+        // 連続認可リクエストに対するレート制限("しばらく待ってから...")に引っかかりやすい。
+        // 空文字ならGoogle側が状況に応じて判断してくれる(既に許可済みなら即時、未許可なら必要な画面を出す)。
+        client.requestAccessToken({ prompt: "" });
       } catch (e) {
         finish(null);
       }
@@ -1831,7 +1834,7 @@
       return { ok: true, rowCount: state.incomes.length + state.expenses.length };
     } catch (e) {
       console.error("Google Sheets sync failed", e);
-      return { ok: false, reason: "api-error" };
+      return { ok: false, reason: "api-error", message: e && e.message ? e.message : String(e) };
     }
   }
 
@@ -1881,7 +1884,8 @@
       updateGoogleStatusUI();
       showGoogleFeedback("Signed in — your spreadsheet is ready");
     } catch (e) {
-      showGoogleFeedback("Couldn't set up the spreadsheet");
+      console.error("sign-in setup failed", e);
+      showGoogleFeedback(`Couldn't set up the spreadsheet: ${e && e.message ? e.message : e}`);
     }
   });
 
@@ -1898,7 +1902,7 @@
     if (monthResult.ok) {
       showGoogleFeedback(`Sheet updated (${monthResult.rowCount} transaction(s) total) and ${emotionResult.successCount} mood entries sent`);
     } else {
-      showGoogleFeedback("Sync failed. Check your Client ID and sign-in status.");
+      showGoogleFeedback(`Sync failed (${monthResult.message || monthResult.reason}). Check your Client ID and sign-in status.`);
     }
   });
 
@@ -1918,7 +1922,7 @@
       showGoogleFeedback("Sheet updated — Japanese labels, summary tab, and colors applied");
     } catch (e) {
       console.error("format sheet failed", e);
-      showGoogleFeedback("Couldn't style the sheet. Try again in a moment.");
+      showGoogleFeedback(`Couldn't update the sheet: ${e && e.message ? e.message : e}`);
     }
     btn.disabled = false;
   });
