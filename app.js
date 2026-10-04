@@ -17,7 +17,7 @@
       lastSeenReportMonth: null, lastRecurringExpenseMonth: null,
       googleClientId: null, googleSpreadsheetId: null, googleFeelingsSheetReady: false, lastSyncedMonth: null,
       googleSheetStyled: false, googleSummarySheetReady: false, googleSheetMigratedJa: false,
-      googleTxSplitByMonth: false,
+      googleTxSplitByMonth: false, sheetSyncSig: {},
     };
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
@@ -40,6 +40,7 @@
         googleSummarySheetReady: parsed.googleSummarySheetReady ?? false,
         googleSheetMigratedJa: parsed.googleSheetMigratedJa ?? false,
         googleTxSplitByMonth: parsed.googleTxSplitByMonth ?? false,
+        sheetSyncSig: parsed.sheetSyncSig && typeof parsed.sheetSyncSig === "object" ? parsed.sheetSyncSig : {},
       };
     } catch (e) {
       console.error("state load failed", e);
@@ -49,6 +50,8 @@
 
   function saveState() {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    // 収入・支出に変更があれば(Google連携中のみ)Googleシートへ自動で反映する
+    scheduleSheetAutoSync();
   }
 
   function uid() {
@@ -70,6 +73,11 @@
   }
 
   let state = loadState();
+
+  // Googleシート自動同期の状態(saveStateから参照されるため、早めに宣言しておく)
+  const sheetAutoSync = { running: false, again: false, backoffUntil: 0, lastError: "" };
+  let sheetOpDepth = 0; // 手動の同期処理(サインイン等)の最中は自動同期を待たせる
+  const moodSyncInFlight = new Set(); // 気持ちの二重送信を防ぐ
   // 月が変わったら自動で追加する固定費(毎月1日付けの支出として計上)
   const RECURRING_MONTHLY_EXPENSES = [
     { category: "家賃", amount: 35000 },
@@ -204,6 +212,7 @@
           googleSummarySheetReady: parsed.googleSummarySheetReady ?? false,
           googleSheetMigratedJa: parsed.googleSheetMigratedJa ?? false,
           googleTxSplitByMonth: parsed.googleTxSplitByMonth ?? false,
+          sheetSyncSig: parsed.sheetSyncSig && typeof parsed.sheetSyncSig === "object" ? parsed.sheetSyncSig : {},
         };
         saveState();
         showBackupFeedback("Backup restored. Reloading…");
@@ -1277,9 +1286,8 @@
 
     if (hasData) showMonthlyReport(prevYear, prevMonth, true);
 
-    if (state.googleClientId && monthKeyNum(prevYear, prevMonth) > (state.lastSyncedMonth ?? -1)) {
-      syncMonthToGoogleSheets(prevYear, prevMonth, { interactive: false });
-    }
+    // 前の月の最終状態も含め、未反映の月は自動同期(scheduleSheetAutoSync)が拾う
+    scheduleSheetAutoSync();
   }
 
   // ---------------------------------------------------------------------
@@ -1316,17 +1324,24 @@
 
   /** アクセストークンを取得する。interactive=false なら、既存のGoogleセッションがある場合のみ
    *  ポップアップなしで取得を試み、失敗したら null を返す(ブラウザのポップアップブロックを避けるため)。 */
+  let googleTokenInFlight = null;
   function requestGoogleToken(interactive) {
-    return new Promise((resolve) => {
+    if (googleAccessToken && Date.now() < googleTokenExpiresAt) return Promise.resolve(googleAccessToken);
+    // GISのトークンクライアントはコールバックが1つしか持てないため、同時に複数要求しない
+    if (googleTokenInFlight) return googleTokenInFlight;
+
+    let settledEarly = false;
+    const p = new Promise((resolve) => {
       const client = ensureTokenClient();
-      if (!client) { resolve(null); return; }
-      if (googleAccessToken && Date.now() < googleTokenExpiresAt) { resolve(googleAccessToken); return; }
+      if (!client) { settledEarly = true; resolve(null); return; }
 
       let settled = false;
       const finish = (value) => {
         if (settled) return;
         settled = true;
+        settledEarly = true;
         clearTimeout(timeoutId);
+        googleTokenInFlight = null;
         resolve(value);
       };
       // ポップアップがブロックされた場合など、コールバックが一切呼ばれないケースがあるため
@@ -1341,13 +1356,44 @@
       };
       try {
         // "consent" だと毎回フル同意画面を強制してしまい、短時間に何度も叩くとGoogle側の
-        // 連続認可リクエストに対するレート制限("しばらく待ってから...")に引っかかりやすい。
-        // 空文字ならGoogle側が状況に応じて判断してくれる(既に許可済みなら即時、未許可なら必要な画面を出す)。
+        // 連続認可リクエストに対するレート制限に引っかかりやすい。空文字ならGoogle側が状況に応じて判断する。
         client.requestAccessToken({ prompt: "" });
       } catch (e) {
         finish(null);
       }
     });
+    if (!settledEarly) googleTokenInFlight = p;
+    return p;
+  }
+
+  /** A1表記のシート名は常にシングルクォートで囲む(数字始まりの「2026年9月」等も安全に扱える) */
+  function a1(title, range) { return `'${String(title).replace(/'/g, "''")}'!${range}`; }
+  function colLetter(n) { let s = ""; while (n > 0) { const r = (n - 1) % 26; s = String.fromCharCode(65 + r) + s; n = Math.floor((n - 1) / 26); } return s; }
+
+  /** APIのエラー応答から原因メッセージを取り出して Error にする(画面に出して原因を特定できるように) */
+  async function apiError(res, label) {
+    let detail = "";
+    try { const j = await res.json(); detail = j && j.error && j.error.message ? j.error.message : ""; } catch (e) { /* 本文なし */ }
+    return new Error(`${label}: ${res.status}${detail ? " " + detail : ""}`);
+  }
+
+  /** シートの先頭(A1)から rows をそのまま書き込む。列幅・行数ぶんの明示的な範囲を指定し、RAWで解釈ずれを避ける */
+  async function putRows(token, sheetTitle, rows) {
+    const width = Math.max(1, ...rows.map(r => r.length));
+    const range = a1(sheetTitle, `A1:${colLetter(width)}${rows.length}`);
+    return fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}/values/${encodeURIComponent(range)}?valueInputOption=RAW`,
+      { method: "PUT", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify({ range, majorDimension: "ROWS", values: rows }) }
+    );
+  }
+
+  /** シートの値を全消去する(列だけ指定して行数の上限に依存しない) */
+  async function clearSheetValues(token, sheetTitle, lastCol) {
+    const range = a1(sheetTitle, `A:${lastCol}`);
+    return fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}/values/${encodeURIComponent(range)}:clear`,
+      { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: "{}" }
+    );
   }
 
   async function ensureSpreadsheet(token) {
@@ -1363,7 +1409,7 @@
         ],
       }),
     });
-    if (!res.ok) throw new Error(`create spreadsheet failed: ${res.status}`);
+    if (!res.ok) throw await apiError(res, `create spreadsheet failed`);
     const data = await res.json();
     state.googleSpreadsheetId = data.spreadsheetId;
     state.googleFeelingsSheetReady = true;
@@ -1371,7 +1417,7 @@
     state.googleSheetMigratedJa = true; // 最初から日本語表記で作成しているので移行不要
     state.googleTxSplitByMonth = true; // 最初から月ごとのタブで作成しているので移行不要
     saveState();
-    await appendRowsToRange(token, `${SHEET_MOODS}!A:B`, [["日時", "内容"]]);
+    await appendRowsToRange(token, a1(SHEET_MOODS, "A:B"), [["日時", "内容"]]);
     try { const now = new Date(); await syncMonthTransactionsSheet(token, now.getFullYear(), now.getMonth()); } catch (e) { console.error("initial transactions failed", e); }
     try { await syncSummarySheet(token); } catch (e) { console.error("initial summary failed", e); }
     try { await applySheetFormatting(token); } catch (e) { console.error("initial sheet styling failed", e); }
@@ -1386,7 +1432,7 @@
       `https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}?fields=sheets.properties.title`,
       { headers: { Authorization: `Bearer ${token}` } }
     );
-    if (!metaRes.ok) throw new Error(`get spreadsheet meta failed: ${metaRes.status}`);
+    if (!metaRes.ok) throw await apiError(metaRes, `get spreadsheet meta failed`);
     const meta = await metaRes.json();
     const hasFeelingsSheet = (meta.sheets || []).some(s => s.properties.title === SHEET_MOODS || s.properties.title === "Moods");
     if (!hasFeelingsSheet) {
@@ -1395,8 +1441,8 @@
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         body: JSON.stringify({ requests: [{ addSheet: { properties: { title: SHEET_MOODS } } }] }),
       });
-      if (!batchRes.ok) throw new Error(`add feelings sheet failed: ${batchRes.status}`);
-      await appendRowsToRange(token, `${SHEET_MOODS}!A:B`, [["日時", "内容"]]);
+      if (!batchRes.ok) throw await apiError(batchRes, `add feelings sheet failed`);
+      await appendRowsToRange(token, a1(SHEET_MOODS, "A:B"), [["日時", "内容"]]);
     }
     state.googleFeelingsSheetReady = true;
     saveState();
@@ -1409,7 +1455,7 @@
       `https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}?fields=sheets.properties.title`,
       { headers: { Authorization: `Bearer ${token}` } }
     );
-    if (!metaRes.ok) throw new Error(`get spreadsheet meta failed: ${metaRes.status}`);
+    if (!metaRes.ok) throw await apiError(metaRes, `get spreadsheet meta failed`);
     const meta = await metaRes.json();
     const hasSummary = (meta.sheets || []).some(s => s.properties.title === SHEET_SUMMARY);
     if (!hasSummary) {
@@ -1418,7 +1464,7 @@
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         body: JSON.stringify({ requests: [{ addSheet: { properties: { title: SHEET_SUMMARY, index: 0 } } }] }),
       });
-      if (!batchRes.ok) throw new Error(`add summary sheet failed: ${batchRes.status}`);
+      if (!batchRes.ok) throw await apiError(batchRes, `add summary sheet failed`);
     }
     state.googleSummarySheetReady = true;
     saveState();
@@ -1432,7 +1478,7 @@
       `https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}?fields=properties.title,sheets.properties(sheetId,title)`,
       { headers: { Authorization: `Bearer ${token}` } }
     );
-    if (!metaRes.ok) throw new Error(`get spreadsheet meta failed: ${metaRes.status}`);
+    if (!metaRes.ok) throw await apiError(metaRes, `get spreadsheet meta failed`);
     const meta = await metaRes.json();
     const sheetsByTitle = {};
     (meta.sheets || []).forEach(s => { sheetsByTitle[s.properties.title] = s.properties; });
@@ -1453,7 +1499,7 @@
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         body: JSON.stringify({ requests: renameRequests }),
       });
-      if (!renameRes.ok) throw new Error(`rename sheets failed: ${renameRes.status}`);
+      if (!renameRes.ok) throw await apiError(renameRes, `rename sheets failed`);
     }
 
     // 旧「取引」タブ自体は migrateToMonthlyTransactionTabs が月ごとのタブへの移行時に削除するので、
@@ -1516,15 +1562,20 @@
   /** サマリータブを、今わかっている収入・支出の全データから毎回まるごと再生成する */
   async function syncSummarySheet(token) {
     const rows = buildSummaryRows();
-    await fetch(
-      `https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}/values/${encodeURIComponent(SHEET_SUMMARY + "!A1:D1000")}:clear`,
-      { method: "POST", headers: { Authorization: `Bearer ${token}` } }
-    );
-    const res = await fetch(
-      `https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}/values/${encodeURIComponent(SHEET_SUMMARY + "!A1")}?valueInputOption=USER_ENTERED`,
-      { method: "PUT", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify({ values: rows }) }
-    );
-    if (!res.ok) throw new Error(`summary update failed: ${res.status}`);
+    const attempt = async () => {
+      const clearRes = await clearSheetValues(token, SHEET_SUMMARY, "D");
+      if (!clearRes.ok) return { res: clearRes, label: "サマリーのクリア失敗" };
+      return { res: await putRows(token, SHEET_SUMMARY, rows), label: "サマリーの書き込み失敗" };
+    };
+    let r = await attempt();
+    if (!r.res.ok && r.res.status === 400) {
+      // タブが消えていた/名前が変わっていた場合に備えて、タブを作り直してから一度だけやり直す
+      await ensureNamedSheetTab(token, SHEET_SUMMARY);
+      r = await attempt();
+    }
+    if (!r.res.ok) throw await apiError(r.res, r.label);
+    state.sheetSyncSig.summary = hashString(JSON.stringify(rows));
+    saveState();
   }
 
   /** 収入(A〜C列)と支出(E〜G列)を左右に分けた2次元配列を組み立てる。
@@ -1562,59 +1613,65 @@
     return buildIncomeExpenseGrid(incomes, expenses);
   }
 
-  /** 指定タブの中身(A1起点、G列まで)をまるごとクリアしてから書き直す */
+  /** 指定タブの中身(A〜G列)をまるごとクリアしてから書き直す */
   async function writeGridToSheet(token, sheetTitle, grid) {
-    await fetch(
-      `https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}/values/${encodeURIComponent(sheetTitle + "!A1:G3000")}:clear`,
-      { method: "POST", headers: { Authorization: `Bearer ${token}` } }
-    );
-    const res = await fetch(
-      `https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}/values/${encodeURIComponent(sheetTitle + "!A1")}?valueInputOption=USER_ENTERED`,
-      { method: "PUT", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify({ values: grid }) }
-    );
-    if (!res.ok) throw new Error(`sheet "${sheetTitle}" update failed: ${res.status}`);
+    const clearRes = await clearSheetValues(token, sheetTitle, "G");
+    if (!clearRes.ok) throw await apiError(clearRes, `「${sheetTitle}」のクリア失敗`);
+    const res = await putRows(token, sheetTitle, grid);
+    if (!res.ok) throw await apiError(res, `「${sheetTitle}」の書き込み失敗`);
   }
 
-  /** 指定タブがまだ無ければ追加する(月ごとの取引タブ用) */
+  /** 指定タブがまだ無ければ追加し、そのタブの sheetId を返す(月ごとの取引タブ用) */
   async function ensureNamedSheetTab(token, title) {
     const metaRes = await fetch(
-      `https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}?fields=sheets.properties.title`,
+      `https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}?fields=sheets.properties(sheetId,title)`,
       { headers: { Authorization: `Bearer ${token}` } }
     );
-    if (!metaRes.ok) throw new Error(`get spreadsheet meta failed: ${metaRes.status}`);
+    if (!metaRes.ok) throw await apiError(metaRes, `get spreadsheet meta failed`);
     const meta = await metaRes.json();
-    const exists = (meta.sheets || []).some(s => s.properties.title === title);
-    if (!exists) {
-      const batchRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}:batchUpdate`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ requests: [{ addSheet: { properties: { title } } }] }),
-      });
-      if (!batchRes.ok) throw new Error(`add sheet "${title}" failed: ${batchRes.status}`);
-    }
+    const found = (meta.sheets || []).find(s => s.properties.title === title);
+    if (found) return found.properties.sheetId;
+    const batchRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}:batchUpdate`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ requests: [{ addSheet: { properties: { title } } }] }),
+    });
+    if (!batchRes.ok) throw await apiError(batchRes, `タブ「${title}」の追加失敗`);
+    const batchData = await batchRes.json();
+    return batchData.replies[0].addSheet.properties.sheetId;
   }
 
-  /** 月ごとの取引タブに、ヘッダー色付け・見出し固定・合計行の強調を適用する */
-  async function styleNamedTransactionsSheet(token, title, grid) {
-    const props = await getSheetPropertiesMap(token);
-    const sheet = props[title];
-    if (!sheet) return;
-    const requests = transactionsHeaderStyleRequests(sheet.sheetId, grid.length - 2);
+  /** 月ごとの取引タブに、ヘッダー色付け・見出し固定・合計行の強調を適用する。
+   *  行が増減すると合計行の位置が変わるので、先にデータ行の書式をリセットしてから付け直す。 */
+  async function styleNamedTransactionsSheet(token, sheetId, grid) {
+    const requests = [
+      {
+        repeatCell: {
+          range: { sheetId, startRowIndex: 2, startColumnIndex: 0, endColumnIndex: 7 },
+          cell: { userEnteredFormat: {} },
+          fields: "userEnteredFormat(backgroundColor,textFormat)",
+        },
+      },
+      ...transactionsHeaderStyleRequests(sheetId, grid.length - 2),
+    ];
     const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}:batchUpdate`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify({ requests }),
     });
-    if (!res.ok) throw new Error(`style sheet "${title}" failed: ${res.status}`);
+    if (!res.ok) throw await apiError(res, "書式の適用失敗");
   }
 
   /** 指定の年月の取引タブを、用意→書き込み→色付けまでまとめて行う */
   async function syncMonthTransactionsSheet(token, year, month) {
     const title = monthSheetTitle(year, month);
-    await ensureNamedSheetTab(token, title);
+    const sheetId = await ensureNamedSheetTab(token, title);
     const grid = buildMonthGrid(year, month);
     await writeGridToSheet(token, title, grid);
-    await styleNamedTransactionsSheet(token, title, grid);
+    await styleNamedTransactionsSheet(token, sheetId, grid);
+    // 書き込みに成功した時点の内容を記録しておく(以降、この内容から変わったら未反映とみなす)
+    state.sheetSyncSig[`${year}-${month}`] = hashString(JSON.stringify(grid));
+    saveState();
     return title;
   }
 
@@ -1636,7 +1693,7 @@
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         body: JSON.stringify({ requests: [{ deleteSheet: { sheetId: props[SHEET_TX].sheetId } }] }),
       });
-      if (!delRes.ok) throw new Error(`delete old transactions sheet failed: ${delRes.status}`);
+      if (!delRes.ok) throw await apiError(delRes, `delete old transactions sheet failed`);
     }
     state.googleTxSplitByMonth = true;
     saveState();
@@ -1660,7 +1717,7 @@
         body: JSON.stringify({ values: rows }),
       }
     );
-    if (!res.ok) throw new Error(`append failed: ${res.status}`);
+    if (!res.ok) throw await apiError(res, `append failed`);
     return res.json();
   }
 
@@ -1670,7 +1727,7 @@
       `https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}?fields=sheets.properties(sheetId,title,gridProperties)`,
       { headers: { Authorization: `Bearer ${token}` } }
     );
-    if (!res.ok) throw new Error(`get spreadsheet meta failed: ${res.status}`);
+    if (!res.ok) throw await apiError(res, `get spreadsheet meta failed`);
     const meta = await res.json();
     const map = {};
     (meta.sheets || []).forEach(s => { map[s.properties.title] = s.properties; });
@@ -1780,7 +1837,7 @@
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify({ requests }),
     });
-    if (!res.ok) throw new Error(`format sheet failed: ${res.status}`);
+    if (!res.ok) throw await apiError(res, `format sheet failed`);
     state.googleSheetStyled = true;
     saveState();
   }
@@ -1788,29 +1845,37 @@
   /** 「今日の気持ち」を記録した瞬間にGoogle Sheetsへ即時保存する */
   async function syncEmotionEntryToSheets(entry, { interactive } = {}) {
     if (!state.googleClientId) return { ok: false, reason: "no-client-id" };
-    let token = await requestGoogleToken(false);
-    if (!token && interactive !== false) token = await requestGoogleToken(true);
-    if (!token) return { ok: false, reason: "auth-required" };
-
+    if (moodSyncInFlight.has(entry.id)) return { ok: false, reason: "in-flight" };
+    moodSyncInFlight.add(entry.id);
     try {
+      let token = await requestGoogleToken(false);
+      if (!token && interactive !== false) token = await requestGoogleToken(true);
+      if (!token) return { ok: false, reason: "auth-required" };
+
       await ensureSpreadsheet(token);
       await ensureModernSheetLayout(token);
       const d = new Date(entry.createdAt);
       const timestamp = `${entry.date} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
-      await appendRowsToRange(token, `${SHEET_MOODS}!A:B`, [[timestamp, entry.text]]);
+      await appendRowsToRange(token, a1(SHEET_MOODS, "A:B"), [[timestamp, entry.text]]);
       return { ok: true };
     } catch (e) {
       console.error("emotion sync failed", e);
-      return { ok: false, reason: "api-error" };
+      return { ok: false, reason: "api-error", message: e && e.message ? e.message : String(e) };
+    } finally {
+      moodSyncInFlight.delete(entry.id);
     }
   }
 
-  /** 未送信のまま残っている気持ちの記録を、まとめて再送信する */
-  async function syncPendingEmotionLogs({ interactive } = {}) {
-    const pending = state.emotionLogs.filter(e => !e.syncedToSheets);
+  /** 未送信のまま残っている気持ちの記録を、まとめて再送信する。
+   *  minAgeMs を指定すると、記録直後(保存ボタン側で送信中)のものは対象から外す。 */
+  async function syncPendingEmotionLogs({ interactive, minAgeMs = 0 } = {}) {
+    const now = Date.now();
+    const pending = state.emotionLogs.filter(e =>
+      !e.syncedToSheets && !moodSyncInFlight.has(e.id) && now - new Date(e.createdAt).getTime() >= minAgeMs);
     let successCount = 0;
     for (const entry of pending) {
       const result = await syncEmotionEntryToSheets(entry, { interactive });
+      if (result.reason === "in-flight") continue;
       if (!result.ok) break; // 認証切れなどの場合は以降も失敗するため打ち切る
       entry.syncedToSheets = true;
       successCount++;
@@ -1819,26 +1884,143 @@
     return { successCount, remaining: pending.length - successCount };
   }
 
-  async function syncMonthToGoogleSheets(year, month, { interactive } = {}) {
-    if (!state.googleClientId) return { ok: false, reason: "no-client-id" };
-    const token = await requestGoogleToken(!!interactive);
-    if (!token) return { ok: false, reason: "auth-required" };
+  // ---------------------------------------------------------------------
+  // 収入・支出の自動同期
+  //  - 月ごとの内容(グリッド)の「ハッシュ」を、シートへ書き込めた時点で state.sheetSyncSig に記録
+  //  - 今のデータから作ったハッシュと食い違う月があれば「未反映」とみなして、その月のタブだけ書き直す
+  //  - saveState のたびに判定するので、追加・編集・削除・固定費の自動追加・過去月の修正も全部拾える
+  // ---------------------------------------------------------------------
+  function hashString(str) {
+    let h = 5381;
+    for (let i = 0; i < str.length; i++) h = ((h << 5) + h + str.charCodeAt(i)) | 0;
+    return `${(h >>> 0).toString(36)}:${str.length}`;
+  }
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
+  /** 全ての月を「未反映」扱いにする(キーは残すので、データが空になった月のタブも書き直される) */
+  function invalidateSheetSigs() {
+    const sigs = state.sheetSyncSig || (state.sheetSyncSig = {});
+    Object.keys(sigs).forEach(k => { sigs[k] = ""; });
+  }
+
+  function isSheetConnected() { return !!(state.googleClientId && state.googleSpreadsheetId); }
+
+  /** 同期が必要な月(y,m)と、サマリーの再生成が必要かどうかを返す */
+  function computeDirtySheetWork() {
+    const sigs = state.sheetSyncSig || (state.sheetSyncSig = {});
+    const keys = new Set(Object.keys(sigs).filter(k => k !== "summary"));
+    const addKey = (e) => { const d = parseDateKey(e.date); keys.add(`${d.getFullYear()}-${d.getMonth()}`); };
+    state.incomes.forEach(addKey);
+    state.expenses.forEach(addKey);
+    const months = [];
+    keys.forEach(key => {
+      const [y, m] = key.split("-").map(Number);
+      if (sigs[key] !== hashString(JSON.stringify(buildMonthGrid(y, m)))) months.push({ y, m });
+    });
+    months.sort((a, b) => (a.y * 12 + a.m) - (b.y * 12 + b.m));
+    const summaryDirty = months.length > 0 || sigs.summary !== hashString(JSON.stringify(buildSummaryRows()));
+    return { months, summaryDirty };
+  }
+
+  function hasUnsyncedMoods() { return state.emotionLogs.some(e => !e.syncedToSheets); }
+
+  function hasPendingSheetWork() {
+    if (!isSheetConnected()) return false;
+    const w = computeDirtySheetWork();
+    return w.months.length > 0 || w.summaryDirty || hasUnsyncedMoods();
+  }
+
+  /** 画面右上の「☁ Synced / Syncing… / Not synced」表示を更新する */
+  function updateSyncBadge() {
+    const el = document.getElementById("sync-badge");
+    if (!el) return;
+    const connected = isSheetConnected();
+    el.classList.toggle("hidden-field", !connected);
+    if (!connected) return;
+    let cls, text;
+    if (sheetAutoSync.running || sheetOpDepth > 0) { cls = "busy"; text = "Syncing…"; }
+    else if (hasPendingSheetWork()) {
+      cls = "pending";
+      text = sheetAutoSync.lastError ? "Sync error · tap" : "Not synced · tap";
+    }
+    else { cls = "ok"; text = "Synced"; }
+    el.className = `sync-badge ${cls}`;
+    el.textContent = `☁ ${text}`;
+    el.title = sheetAutoSync.lastError || "";
+  }
+
+  /** 手動の同期処理(サインイン・Update Sheet など)を囲む。実行中は自動同期を待たせ、終わったら改めて判定する */
+  async function withSheetOp(fn) {
+    sheetOpDepth++;
+    updateSyncBadge();
     try {
-      await ensureSpreadsheet(token);
-      await ensureModernSheetLayout(token);
-      await syncMonthTransactionsSheet(token, year, month);
-      await syncSummarySheet(token);
-      state.lastSyncedMonth = monthKeyNum(year, month);
-      saveState();
-      return { ok: true, rowCount: state.incomes.length + state.expenses.length };
-    } catch (e) {
-      console.error("Google Sheets sync failed", e);
-      return { ok: false, reason: "api-error", message: e && e.message ? e.message : String(e) };
+      return await fn();
+    } finally {
+      sheetOpDepth--;
+      updateSyncBadge();
+      if (sheetOpDepth === 0) scheduleSheetAutoSync();
     }
   }
 
+  /** 未反映の月・サマリー・気持ちをGoogleシートへ反映する。
+   *  force=true: バックオフを無視する / full=true: 全ての月を無条件で書き直す(シート側を手で壊した時の修復用) */
+  async function runSheetAutoSync({ force = false, full = false } = {}) {
+    if (!isSheetConnected()) return { ok: false, reason: "not-connected" };
+    if (sheetAutoSync.running || sheetOpDepth > 0) { sheetAutoSync.again = true; return { ok: false, reason: "busy" }; }
+    if (!force && Date.now() < sheetAutoSync.backoffUntil) { updateSyncBadge(); return { ok: false, reason: "backoff" }; }
+    if (full) invalidateSheetSigs();
+
+    const first = computeDirtySheetWork();
+    const now = Date.now();
+    const moodsPending = state.emotionLogs.some(e =>
+      !e.syncedToSheets && !moodSyncInFlight.has(e.id) && now - new Date(e.createdAt).getTime() >= (force ? 0 : 15000));
+    if (!first.months.length && !first.summaryDirty && !moodsPending) { updateSyncBadge(); return { ok: true, months: 0, moods: 0 }; }
+
+    sheetAutoSync.running = true;
+    updateSyncBadge();
+    const result = { ok: true, months: 0, moods: 0 };
+    try {
+      // ボタン操作の中で呼ばれた場合は、この呼び出しがポップアップ許可の対象になる(awaitより前に実行される)
+      const token = await requestGoogleToken(true);
+      if (!token) throw new Error("Google sign-in needed — tap the ☁ badge to retry");
+      await ensureSpreadsheet(token);
+      await ensureModernSheetLayout(token);
+      do {
+        sheetAutoSync.again = false;
+        const work = computeDirtySheetWork();
+        for (const mo of work.months) {
+          await syncMonthTransactionsSheet(token, mo.y, mo.m);
+          result.months++;
+          await sleep(300); // Sheets APIの毎分上限に引っかからないよう間隔を空ける
+        }
+        if (work.months.length || work.summaryDirty) await syncSummarySheet(token);
+      } while (sheetAutoSync.again);
+
+      const moodResult = await syncPendingEmotionLogs({ interactive: false, minAgeMs: force ? 0 : 15000 });
+      result.moods = moodResult.successCount;
+      sheetAutoSync.backoffUntil = 0;
+      sheetAutoSync.lastError = "";
+    } catch (e) {
+      console.error("sheet auto-sync failed", e);
+      result.ok = false;
+      result.message = e && e.message ? e.message : String(e);
+      sheetAutoSync.lastError = result.message;
+      sheetAutoSync.backoffUntil = Date.now() + 2 * 60 * 1000; // 失敗が続いても連打しない(手動で☁をタップすれば即再試行)
+    } finally {
+      sheetAutoSync.running = false;
+      updateSyncBadge();
+    }
+    return result;
+  }
+
+  function scheduleSheetAutoSync() {
+    if (!isSheetConnected()) return;
+    if (sheetAutoSync.running || sheetOpDepth > 0) { sheetAutoSync.again = true; return; }
+    runSheetAutoSync().catch(() => {});
+  }
+
   function updateGoogleStatusUI() {
+    updateSyncBadge();
     const box = document.getElementById("google-status-value");
     if (!state.googleClientId) {
       box.textContent = "Not connected (no client ID)";
@@ -1874,13 +2056,21 @@
     showGoogleFeedback("Signing in…");
     const token = await requestGoogleToken(true);
     if (!token) { showGoogleFeedback("Google sign-in failed. Check for a blocked popup or an incorrect Client ID."); return; }
+    if (sheetAutoSync.running) { showGoogleFeedback("A sync is already running — try again in a moment"); return; }
     try {
-      await ensureSpreadsheet(token);
-      await ensureModernSheetLayout(token);
-      const now = new Date();
-      await syncMonthTransactionsSheet(token, now.getFullYear(), now.getMonth());
-      await syncSummarySheet(token);
-      await applySheetFormatting(token);
+      await withSheetOp(async () => {
+        await ensureSpreadsheet(token);
+        await ensureModernSheetLayout(token);
+        invalidateSheetSigs(); // 初回/再接続時は全ての月を書き直す
+        const now = new Date();
+        for (const mo of computeDirtySheetWork().months) {
+          await syncMonthTransactionsSheet(token, mo.y, mo.m);
+          await sleep(300);
+        }
+        await syncMonthTransactionsSheet(token, now.getFullYear(), now.getMonth());
+        await syncSummarySheet(token);
+        await applySheetFormatting(token);
+      });
       updateGoogleStatusUI();
       showGoogleFeedback("Signed in — your spreadsheet is ready");
     } catch (e) {
@@ -1890,35 +2080,43 @@
   });
 
   document.getElementById("google-sync-now-btn").addEventListener("click", async () => {
-    const now = new Date();
     const btn = document.getElementById("google-sync-now-btn");
+    if (!isSheetConnected()) { showGoogleFeedback("Sign in first so a spreadsheet exists"); return; }
     btn.disabled = true;
-    showGoogleFeedback("Syncing…");
-    const monthResult = await syncMonthToGoogleSheets(now.getFullYear(), now.getMonth(), { interactive: true });
-    const emotionResult = await syncPendingEmotionLogs({ interactive: true });
+    showGoogleFeedback("Syncing everything…");
+    // full=true: シート側で手を加えた/タブを消した場合も含めて、全ての月をアプリのデータで書き直す
+    const result = await runSheetAutoSync({ force: true, full: true });
     btn.disabled = false;
     updateGoogleStatusUI();
     renderEmotionLog();
-    if (monthResult.ok) {
-      showGoogleFeedback(`Sheet updated (${monthResult.rowCount} transaction(s) total) and ${emotionResult.successCount} mood entries sent`);
+    if (result.ok) {
+      showGoogleFeedback(`Sheet fully updated (${result.months} month tab(s)) and ${result.moods} mood entries sent`);
+    } else if (result.reason === "busy") {
+      showGoogleFeedback("A sync is already running — try again in a moment");
     } else {
-      showGoogleFeedback(`Sync failed (${monthResult.message || monthResult.reason}). Check your Client ID and sign-in status.`);
+      showGoogleFeedback(`Sync failed (${result.message || result.reason}). Check your Client ID and sign-in status.`);
     }
   });
 
   document.getElementById("google-format-btn").addEventListener("click", async () => {
     if (!state.googleSpreadsheetId) { showGoogleFeedback("Sign in first so a spreadsheet exists"); return; }
+    if (sheetAutoSync.running) { showGoogleFeedback("A sync is already running — try again in a moment"); return; }
     const btn = document.getElementById("google-format-btn");
     btn.disabled = true;
-    showGoogleFeedback("Styling sheet…");
+    showGoogleFeedback("Updating sheet…");
     const token = await requestGoogleToken(true);
     if (!token) { btn.disabled = false; showGoogleFeedback("Google sign-in failed"); return; }
     try {
-      await ensureModernSheetLayout(token);
-      const now = new Date();
-      await syncMonthTransactionsSheet(token, now.getFullYear(), now.getMonth());
-      await syncSummarySheet(token);
-      await applySheetFormatting(token);
+      await withSheetOp(async () => {
+        await ensureModernSheetLayout(token);
+        invalidateSheetSigs();
+        for (const mo of computeDirtySheetWork().months) {
+          await syncMonthTransactionsSheet(token, mo.y, mo.m);
+          await sleep(300);
+        }
+        await syncSummarySheet(token);
+        await applySheetFormatting(token);
+      });
       showGoogleFeedback("Sheet updated — Japanese labels, summary tab, and colors applied");
     } catch (e) {
       console.error("format sheet failed", e);
@@ -1936,6 +2134,7 @@
     state.googleSummarySheetReady = false;
     state.googleSheetMigratedJa = false;
     state.googleTxSplitByMonth = false;
+    state.sheetSyncSig = {};
     googleTokenClient = null;
     googleAccessToken = null;
     saveState();
@@ -1989,4 +2188,27 @@
   renderHome();
   showView("home");
   maybeShowMonthlyReport();
+
+  // --- Googleシート自動同期のトリガー ---
+  const syncBadgeEl = document.getElementById("sync-badge");
+  if (syncBadgeEl) {
+    syncBadgeEl.addEventListener("click", async () => {
+      if (sheetAutoSync.running) return;
+      const r = await runSheetAutoSync({ force: true });
+      if (!r.ok && r.reason !== "busy") showGoogleFeedback(`Sync failed (${r.message || r.reason})`);
+      renderEmotionLog();
+    });
+  }
+  // 画面のどこかをタップしたとき、未反映があれば反映を試みる(タップ中なのでGoogleのポップアップも許可される)
+  document.addEventListener("click", (e) => {
+    if (e.target.closest && e.target.closest("#sheet-settings, #sync-badge")) return; // 手動操作とぶつけない
+    if (isSheetConnected()) scheduleSheetAutoSync();
+  }, true);
+  // アプリに戻ってきたとき、トークンが有効ならそのまま(ポップアップなしで)反映する
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) return;
+    updateSyncBadge();
+    if (googleAccessToken && Date.now() < googleTokenExpiresAt) scheduleSheetAutoSync();
+  });
+  updateSyncBadge();
 })();

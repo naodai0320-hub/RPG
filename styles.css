@@ -84,6 +84,29 @@ button, input, textarea, select {
   transition: transform .15s ease;
 }
 .settings-btn:active { transform: scale(0.92); }
+.topbar-actions { display: flex; align-items: center; gap: 10px; }
+.sync-badge {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-secondary);
+  border-radius: var(--radius-pill);
+  padding: 7px 12px;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  backdrop-filter: var(--card-blur);
+  -webkit-backdrop-filter: var(--card-blur);
+  transition: color .2s ease, border-color .2s ease;
+}
+.sync-badge.ok { color: var(--success); }
+.sync-badge.busy { color: var(--text-secondary); }
+.sync-badge.pending {
+  color: var(--accent-2);
+  border-color: color-mix(in srgb, var(--accent-2) 55%, transparent);
+  box-shadow: 0 0 14px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+.sync-badge:active { transform: scale(0.95); }
 
 #views {
   flex: 1;
