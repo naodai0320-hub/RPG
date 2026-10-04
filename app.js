@@ -1574,6 +1574,20 @@
       r = await attempt();
     }
     if (!r.res.ok) throw await apiError(r.res, r.label);
+    if (!state.sheetSyncSig.summaryFmt) {
+      // 収入・支出・差額の列(B〜D)を3桁区切りにする。列全体への設定なので一度で足りる
+      const sheetId = await ensureNamedSheetTab(token, SHEET_SUMMARY);
+      const fmtRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}:batchUpdate`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ requests: [{
+          repeatCell: { range: { sheetId, startRowIndex: 1, startColumnIndex: 1, endColumnIndex: 4 },
+            cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "#,##0" } } }, fields: "userEnteredFormat.numberFormat" },
+        }] }),
+      });
+      if (!fmtRes.ok) throw await apiError(fmtRes, "サマリーの数字書式の適用失敗");
+      state.sheetSyncSig.summaryFmt = "1";
+    }
     state.sheetSyncSig.summary = hashString(JSON.stringify(rows));
     saveState();
   }
@@ -1789,6 +1803,11 @@
       { updateDimensionProperties: { range: { sheetId, dimension: "COLUMNS", startIndex: 3, endIndex: 4 }, properties: { pixelSize: 24 }, fields: "pixelSize" } },
       { updateDimensionProperties: { range: { sheetId, dimension: "COLUMNS", startIndex: 4, endIndex: 7 }, properties: { pixelSize: 130 }, fields: "pixelSize" } },
     ];
+    // 金額列(C列・G列)を 12,345 のように3桁区切りで表示する(列全体に設定するので、今後増える行にも効く)
+    const numFmt = { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "#,##0" } } };
+    [[2, 3], [6, 7]].forEach(([c0, c1]) => requests.push({
+      repeatCell: { range: { sheetId, startRowIndex: 2, startColumnIndex: c0, endColumnIndex: c1 }, cell: numFmt, fields: "userEnteredFormat.numberFormat" },
+    }));
     if (typeof totalsStartRowIndex === "number") {
       // 「合計」「差額」の2行を太字+薄い色の帯にして目立たせる
       requests.push({
@@ -1908,7 +1927,7 @@
   /** 同期が必要な月(y,m)と、サマリーの再生成が必要かどうかを返す */
   function computeDirtySheetWork() {
     const sigs = state.sheetSyncSig || (state.sheetSyncSig = {});
-    const keys = new Set(Object.keys(sigs).filter(k => k !== "summary"));
+    const keys = new Set(Object.keys(sigs).filter(k => /^\d+-\d+$/.test(k)));
     const addKey = (e) => { const d = parseDateKey(e.date); keys.add(`${d.getFullYear()}-${d.getMonth()}`); };
     state.incomes.forEach(addKey);
     state.expenses.forEach(addKey);
@@ -1969,6 +1988,8 @@
     if (sheetAutoSync.running || sheetOpDepth > 0) { sheetAutoSync.again = true; return { ok: false, reason: "busy" }; }
     if (!force && Date.now() < sheetAutoSync.backoffUntil) { updateSyncBadge(); return { ok: false, reason: "backoff" }; }
     if (full) invalidateSheetSigs();
+    // 書式の仕様を変えたとき(3桁区切り追加など)は、既存のタブにも一度だけ適用し直す
+    if (!state.sheetSyncSig.fmtV1) invalidateSheetSigs();
 
     const first = computeDirtySheetWork();
     const now = Date.now();
@@ -1998,6 +2019,8 @@
 
       const moodResult = await syncPendingEmotionLogs({ interactive: false, minAgeMs: force ? 0 : 15000 });
       result.moods = moodResult.successCount;
+      state.sheetSyncSig.fmtV1 = "1";
+      saveState();
       sheetAutoSync.backoffUntil = 0;
       sheetAutoSync.lastError = "";
     } catch (e) {
