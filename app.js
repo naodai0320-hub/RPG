@@ -13,7 +13,7 @@
   function loadState() {
     const empty = {
       goals: [], habits: [], incomes: [], expenses: [],
-      todayTasks: [], emotionLogs: [],
+      todayTasks: [], emotionLogs: [], completedTasks: [],
       lastSeenReportMonth: null, lastRecurringExpenseMonth: null,
       googleClientId: null, googleSpreadsheetId: null, googleFeelingsSheetReady: false, lastSyncedMonth: null,
       googleSheetStyled: false, googleSummarySheetReady: false, googleSheetMigratedJa: false,
@@ -30,6 +30,7 @@
         expenses: parsed.expenses || [],
         todayTasks: parsed.todayTasks || [],
         emotionLogs: parsed.emotionLogs || [],
+        completedTasks: parsed.completedTasks || [],
         lastSeenReportMonth: parsed.lastSeenReportMonth ?? null,
         lastRecurringExpenseMonth: parsed.lastRecurringExpenseMonth ?? null,
         googleClientId: parsed.googleClientId ?? null,
@@ -202,6 +203,7 @@
           expenses: parsed.expenses || [],
           todayTasks: parsed.todayTasks || [],
           emotionLogs: parsed.emotionLogs || [],
+          completedTasks: parsed.completedTasks || [],
           lastSeenReportMonth: parsed.lastSeenReportMonth ?? null,
           lastRecurringExpenseMonth: parsed.lastRecurringExpenseMonth ?? null,
           googleClientId: parsed.googleClientId ?? null,
@@ -1107,6 +1109,8 @@
       li.querySelector(".today-task-text").textContent = task.text;
       li.querySelector(".today-task-check").addEventListener("click", () => {
         state.todayTasks = state.todayTasks.filter(t => t.id !== task.id);
+        // 画面からは消えるが、Googleシートの「やること」に履歴として残すため記録しておく
+        state.completedTasks.push({ id: task.id, text: task.text, date: task.date, doneAt: new Date().toISOString() });
         saveState();
         renderTodayTasks();
       });
@@ -1924,6 +1928,127 @@
 
   function isSheetConnected() { return !!(state.googleClientId && state.googleSpreadsheetId); }
 
+  // ---------------------------------------------------------------------
+  // 習慣・やること(Daily Quests)のシート
+  // ---------------------------------------------------------------------
+  const HABIT_DAY_COLS = 31; // B列〜AF列が1日〜31日、AG列=達成数、AH列=達成率
+
+  /** 習慣タブ: 月ごとのブロック(新しい月が上)。アプリの習慣グリッドと同じ「習慣×日」の表 */
+  function buildHabitsSheet() {
+    const monthKey = (d) => d.getFullYear() * 12 + d.getMonth();
+    const todayD = dateOnly(today);
+    let minKey = monthKey(todayD);
+    state.habits.forEach(h => {
+      minKey = Math.min(minKey, monthKey(new Date(h.createdAt)));
+      h.completedDates.forEach(k => { minKey = Math.min(minKey, monthKey(parseDateKey(k))); });
+    });
+    const grid = [];
+    const blocks = [];
+    if (!state.habits.length) {
+      return { grid: [["習慣はまだありません"]], blocks };
+    }
+    for (let key = monthKey(todayD); key >= minKey; key--) {
+      const y = Math.floor(key / 12), m = key % 12;
+      const dim = daysInMonth(y, m).length;
+      const monthStart = new Date(y, m, 1), monthEnd = new Date(y, m, dim);
+      const habits = state.habits.filter(h => dateOnly(new Date(h.createdAt)) <= monthEnd);
+      if (!habits.length) continue;
+      const titleRow = grid.length;
+      grid.push([`${y}年${m + 1}月`]);
+      const header = ["習慣"];
+      for (let d = 1; d <= HABIT_DAY_COLS; d++) header.push(d <= dim ? d : "");
+      header.push("達成数", "達成率");
+      grid.push(header);
+      const firstRow = grid.length;
+      habits.forEach(h => {
+        const done = new Set(h.completedDates);
+        const row = [h.title];
+        let count = 0;
+        for (let d = 1; d <= HABIT_DAY_COLS; d++) {
+          if (d <= dim && done.has(`${y}-${pad2(m + 1)}-${pad2(d)}`)) { row.push("✓"); count++; } else row.push("");
+        }
+        const start = new Date(Math.max(monthStart, dateOnly(new Date(h.createdAt))));
+        const end = new Date(Math.min(monthEnd, todayD));
+        const considered = Math.max(0, Math.round((end - start) / 86400000) + 1);
+        row.push(count, considered > 0 ? count / considered : "");
+        grid.push(row);
+      });
+      blocks.push({ titleRow, headerRow: titleRow + 1, firstRow, lastRow: grid.length - 1 });
+      grid.push([]); // ブロックの区切りの空行
+    }
+    return { grid, blocks };
+  }
+
+  function habitsStyleRequests(sheetId, built) {
+    const total = HABIT_DAY_COLS + 3; // A + 31日 + 達成数 + 達成率
+    const white = { red: 1, green: 1, blue: 1 };
+    const reqs = [
+      { repeatCell: { range: { sheetId }, cell: { userEnteredFormat: {} }, fields: "userEnteredFormat" } },
+      { updateSheetProperties: { properties: { sheetId, gridProperties: { frozenRowCount: 0, frozenColumnCount: 1 } }, fields: "gridProperties.frozenRowCount,gridProperties.frozenColumnCount" } },
+      { updateDimensionProperties: { range: { sheetId, dimension: "COLUMNS", startIndex: 0, endIndex: 1 }, properties: { pixelSize: 150 }, fields: "pixelSize" } },
+      { updateDimensionProperties: { range: { sheetId, dimension: "COLUMNS", startIndex: 1, endIndex: 1 + HABIT_DAY_COLS }, properties: { pixelSize: 30 }, fields: "pixelSize" } },
+      { updateDimensionProperties: { range: { sheetId, dimension: "COLUMNS", startIndex: 1 + HABIT_DAY_COLS, endIndex: total }, properties: { pixelSize: 70 }, fields: "pixelSize" } },
+    ];
+    built.blocks.forEach(b => {
+      reqs.push(
+        { repeatCell: { range: { sheetId, startRowIndex: b.titleRow, endRowIndex: b.titleRow + 1, startColumnIndex: 0, endColumnIndex: 1 },
+            cell: { userEnteredFormat: { textFormat: { bold: true, fontSize: 13 } } }, fields: "userEnteredFormat.textFormat" } },
+        { repeatCell: { range: { sheetId, startRowIndex: b.headerRow, endRowIndex: b.headerRow + 1, startColumnIndex: 0, endColumnIndex: total },
+            cell: { userEnteredFormat: { backgroundColor: { red: 1, green: 0.427, blue: 0.161 }, textFormat: { bold: true, foregroundColor: white }, horizontalAlignment: "CENTER" } },
+            fields: "userEnteredFormat(backgroundColor,textFormat,horizontalAlignment)" } },
+        { repeatCell: { range: { sheetId, startRowIndex: b.firstRow, endRowIndex: b.lastRow + 1, startColumnIndex: 1, endColumnIndex: 1 + HABIT_DAY_COLS },
+            cell: { userEnteredFormat: { horizontalAlignment: "CENTER", textFormat: { bold: true, foregroundColor: { red: 0.18, green: 0.62, blue: 0.32 } }, backgroundColor: { red: 0.95, green: 0.99, blue: 0.96 } } },
+            fields: "userEnteredFormat(horizontalAlignment,textFormat,backgroundColor)" } },
+        { repeatCell: { range: { sheetId, startRowIndex: b.firstRow, endRowIndex: b.lastRow + 1, startColumnIndex: 1 + HABIT_DAY_COLS, endColumnIndex: total },
+            cell: { userEnteredFormat: { horizontalAlignment: "CENTER", textFormat: { bold: true } } }, fields: "userEnteredFormat(horizontalAlignment,textFormat)" } },
+        { repeatCell: { range: { sheetId, startRowIndex: b.firstRow, endRowIndex: b.lastRow + 1, startColumnIndex: total - 1, endColumnIndex: total },
+            cell: { userEnteredFormat: { numberFormat: { type: "PERCENT", pattern: "0%" } } }, fields: "userEnteredFormat.numberFormat" } },
+      );
+    });
+    return reqs;
+  }
+
+  /** やることタブ: 未完了(Daily Quests に残っているもの)+ 完了した履歴 */
+  function buildTasksSheet() {
+    const fmt = (iso) => { const d = new Date(iso); return `${dateKey(d)} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`; };
+    const grid = [["状態", "内容", "追加日", "完了日時"]];
+    state.todayTasks.slice().sort((a, b) => a.date.localeCompare(b.date))
+      .forEach(t => grid.push(["未完了", t.text, t.date, ""]));
+    state.completedTasks.slice().sort((a, b) => b.doneAt.localeCompare(a.doneAt))
+      .forEach(t => grid.push(["完了", t.text, t.date, fmt(t.doneAt)]));
+    return { grid, blocks: [] };
+  }
+
+  function tasksStyleRequests(sheetId, built) {
+    return [
+      { repeatCell: { range: { sheetId, startRowIndex: 1 }, cell: { userEnteredFormat: {} }, fields: "userEnteredFormat" } },
+      ...headerStyleRequests(sheetId, 4),
+      { updateDimensionProperties: { range: { sheetId, dimension: "COLUMNS", startIndex: 1, endIndex: 2 }, properties: { pixelSize: 320 }, fields: "pixelSize" } },
+    ];
+  }
+
+  const EXTRA_SHEETS = [
+    { key: "habits", title: "習慣", lastCol: "AH", build: buildHabitsSheet, style: habitsStyleRequests },
+    { key: "tasks", title: "やること", lastCol: "D", build: buildTasksSheet, style: tasksStyleRequests },
+  ];
+
+  async function syncExtraSheet(token, def) {
+    const built = def.build();
+    const sheetId = await ensureNamedSheetTab(token, def.title);
+    const clearRes = await clearSheetValues(token, def.title, def.lastCol);
+    if (!clearRes.ok) throw await apiError(clearRes, `「${def.title}」のクリア失敗`);
+    const res = await putRows(token, def.title, built.grid);
+    if (!res.ok) throw await apiError(res, `「${def.title}」の書き込み失敗`);
+    const styleRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}:batchUpdate`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ requests: def.style(sheetId, built) }),
+    });
+    if (!styleRes.ok) throw await apiError(styleRes, `「${def.title}」の書式適用失敗`);
+    state.sheetSyncSig[def.key] = hashString(JSON.stringify(built.grid));
+    saveState();
+  }
+
   /** 同期が必要な月(y,m)と、サマリーの再生成が必要かどうかを返す */
   function computeDirtySheetWork() {
     const sigs = state.sheetSyncSig || (state.sheetSyncSig = {});
@@ -1938,7 +2063,8 @@
     });
     months.sort((a, b) => (a.y * 12 + a.m) - (b.y * 12 + b.m));
     const summaryDirty = months.length > 0 || sigs.summary !== hashString(JSON.stringify(buildSummaryRows()));
-    return { months, summaryDirty };
+    const extras = EXTRA_SHEETS.filter(def => sigs[def.key] !== hashString(JSON.stringify(def.build().grid)));
+    return { months, summaryDirty, extras };
   }
 
   function hasUnsyncedMoods() { return state.emotionLogs.some(e => !e.syncedToSheets); }
@@ -1947,7 +2073,7 @@
     if (!isSheetConnected()) return false;
     const w = computeDirtySheetWork();
     // fmtV1 が無い = 書式の更新(3桁区切りなど)がまだ既存タブに適用されていない
-    return w.months.length > 0 || w.summaryDirty || hasUnsyncedMoods() || !(state.sheetSyncSig && state.sheetSyncSig.fmtV1);
+    return w.months.length > 0 || w.summaryDirty || w.extras.length > 0 || hasUnsyncedMoods() || !(state.sheetSyncSig && state.sheetSyncSig.fmtV1);
   }
 
   /** 画面右上の「☁ Synced / Syncing… / Not synced」表示を更新する */
@@ -1996,7 +2122,7 @@
     const now = Date.now();
     const moodsPending = state.emotionLogs.some(e =>
       !e.syncedToSheets && !moodSyncInFlight.has(e.id) && now - new Date(e.createdAt).getTime() >= (force ? 0 : 15000));
-    if (!first.months.length && !first.summaryDirty && !moodsPending) { updateSyncBadge(); return { ok: true, months: 0, moods: 0 }; }
+    if (!first.months.length && !first.summaryDirty && !first.extras.length && !moodsPending) { updateSyncBadge(); return { ok: true, months: 0, moods: 0 }; }
 
     sheetAutoSync.running = true;
     updateSyncBadge();
@@ -2016,6 +2142,7 @@
           await sleep(300); // Sheets APIの毎分上限に引っかからないよう間隔を空ける
         }
         if (work.months.length || work.summaryDirty) await syncSummarySheet(token);
+        for (const def of work.extras) { await syncExtraSheet(token, def); result.months++; await sleep(300); }
       } while (sheetAutoSync.again);
 
       const moodResult = await syncPendingEmotionLogs({ interactive: false, minAgeMs: force ? 0 : 15000 });
