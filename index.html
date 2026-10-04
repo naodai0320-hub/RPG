@@ -111,8 +111,8 @@
         <div class="quick-add-row">
           <input type="text" id="income-quick-source" list="income-source-list" class="quick-source" placeholder="Category">
           <button id="income-quick-add-btn" class="quick-add-btn">Add</button>
+          <div id="income-source-chips" class="suggest-panel" role="listbox" aria-label="Previously used categories"></div>
         </div>
-        <div id="income-source-chips" class="chip-row hidden-field" aria-label="Previously used categories"></div>
       </div>
 
       <div class="month-nav">
@@ -157,8 +157,8 @@
         <div class="quick-add-row">
           <input type="text" id="expense-quick-category" list="expense-category-list" class="quick-source" placeholder="Category">
           <button id="expense-quick-add-btn" class="quick-add-btn">Add</button>
+          <div id="expense-category-chips" class="suggest-panel" role="listbox" aria-label="Previously used categories"></div>
         </div>
-        <div id="expense-category-chips" class="chip-row hidden-field" aria-label="Previously used categories"></div>
       </div>
 
       <div class="month-nav">
@@ -367,8 +367,8 @@
       <p class="empty-note" id="backup-feedback"></p>
 
       <label class="field-label">Category tabs</label>
-      <p class="hint-box">Long-press a category tab on the Income/Expense screen to hide it. Fixed monthly costs (rent, phone, etc.) never appear as tabs.</p>
-      <button id="reset-hidden-chips-btn" class="quick-add-btn full-btn">Show hidden category tabs</button>
+      <p class="hint-box">Tap the Category field on the Income/Expense screen to pick a past entry. Long-press an option to hide it. Fixed monthly costs (rent, phone, etc.) never appear as tabs.</p>
+      <button id="reset-hidden-chips-btn" class="quick-add-btn full-btn">Show hidden category options</button>
 
       <p class="hint-box">
         Income/expense transactions are appended to your Google Sheet whenever the month changes; Mood Board entries are appended the instant you save them.

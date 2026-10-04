@@ -672,44 +672,64 @@
     return [...stat.entries()].sort((a, b) => b[1].count - a[1].count || b[1].last.localeCompare(a[1].last)).map(([v]) => v);
   }
 
-  /** 入力欄の下に「一度使った内容」をタブ(チップ)で並べる。タップで入力欄に入り、長押しでこのタブを非表示にできる */
+  /** カテゴリ欄を押すと、過去に使った内容が下にずらっと出る(タップで入力、長押しでその項目を非表示) */
   function renderQuickChips(containerId, inputId, values, kind) {
     const box = document.getElementById(containerId);
     const input = document.getElementById(inputId);
     if (!box || !input) return;
-    box.innerHTML = "";
-    box.classList.toggle("hidden-field", values.length === 0);
-    const refreshActive = () => box.querySelectorAll(".chip").forEach(c => c.classList.toggle("active", c.dataset.value === input.value.trim()));
-    values.slice(0, 20).forEach(v => {
-      const b = document.createElement("button");
-      b.type = "button";
-      b.className = "chip";
-      b.dataset.value = v;
-      b.textContent = v;
-      let timer = null, longPressed = false;
-      const cancel = () => { clearTimeout(timer); timer = null; };
-      b.addEventListener("pointerdown", () => {
-        longPressed = false;
-        timer = setTimeout(() => {
-          longPressed = true;
-          if (confirm(`「${v}」をタブに出さないようにしますか?\n(設定の「Show hidden category tabs」でいつでも戻せます)`)) {
-            state.hiddenChips[kind].push(v);
-            saveState();
-            if (kind === "income") updateIncomeSourceOptions(); else updateExpenseCategoryOptions();
-          }
-        }, 650);
+    box._values = values;
+    box._kind = kind;
+
+    const build = () => {
+      const typed = input.value.trim();
+      const exact = box._values.includes(typed);
+      // 入力途中なら絞り込み。選択済み(完全一致)のときは全件出して選び直せるようにする
+      const items = (!typed || exact) ? box._values : box._values.filter(v => v.toLowerCase().includes(typed.toLowerCase()));
+      box.innerHTML = "";
+      items.slice(0, 30).forEach(v => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "suggest-item" + (v === typed ? " current" : "");
+        b.setAttribute("role", "option");
+        b.textContent = v;
+        let timer = null, longPressed = false;
+        const cancel = () => { clearTimeout(timer); timer = null; };
+        b.addEventListener("pointerdown", (e) => {
+          e.preventDefault(); // 入力欄からフォーカスを外さない(外れると先に閉じてしまうため)
+          longPressed = false;
+          timer = setTimeout(() => {
+            longPressed = true;
+            if (confirm(`「${v}」を選択肢に出さないようにしますか?\n(設定の「Show hidden category options」でいつでも戻せます)`)) {
+              state.hiddenChips[box._kind].push(v);
+              saveState();
+              if (box._kind === "income") updateIncomeSourceOptions(); else updateExpenseCategoryOptions();
+              build();
+            }
+          }, 650);
+        });
+        ["pointerup", "pointerleave", "pointercancel"].forEach(ev => b.addEventListener(ev, cancel));
+        b.addEventListener("contextmenu", (e) => e.preventDefault());
+        b.addEventListener("click", () => {
+          if (longPressed) { longPressed = false; return; }
+          input.value = v;
+          box.classList.remove("open");
+          input.blur();
+        });
+        box.appendChild(b);
       });
-      ["pointerup", "pointerleave", "pointercancel"].forEach(ev => b.addEventListener(ev, cancel));
-      b.addEventListener("contextmenu", (e) => e.preventDefault());
-      b.addEventListener("click", () => {
-        if (longPressed) { longPressed = false; return; }
-        input.value = v;
-        refreshActive();
-      });
-      box.appendChild(b);
-    });
-    if (!input.dataset.chipBound) { input.addEventListener("input", refreshActive); input.dataset.chipBound = "1"; }
-    refreshActive();
+      return items.length;
+    };
+    box._build = build;
+
+    if (!input.dataset.chipBound) {
+      const open = () => { if (box._build && box._build() > 0) box.classList.add("open"); else box.classList.remove("open"); };
+      input.addEventListener("focus", open);
+      input.addEventListener("click", open);
+      input.addEventListener("input", open);
+      input.addEventListener("blur", () => setTimeout(() => box.classList.remove("open"), 120));
+      input.dataset.chipBound = "1";
+    }
+    if (box.classList.contains("open")) { if (build() === 0) box.classList.remove("open"); }
   }
 
   function updateIncomeSourceOptions() {
