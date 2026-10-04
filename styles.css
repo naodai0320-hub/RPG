@@ -719,6 +719,7 @@ textarea { resize: vertical; }
   white-space: nowrap;
   transition: transform .12s ease, color .15s ease, border-color .15s ease, background-color .15s ease;
 }
+.chip { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
 .chip:active { transform: scale(0.95); }
 .chip.active {
   color: var(--text);

@@ -18,6 +18,7 @@
       googleClientId: null, googleSpreadsheetId: null, googleFeelingsSheetReady: false, lastSyncedMonth: null,
       googleSheetStyled: false, googleSummarySheetReady: false, googleSheetMigratedJa: false,
       googleTxSplitByMonth: false, sheetSyncSig: {},
+      hiddenChips: { expense: ["食品", "衛生", "管理士代", "歯医者代"], income: [] },
     };
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
@@ -42,6 +43,7 @@
         googleSheetMigratedJa: parsed.googleSheetMigratedJa ?? false,
         googleTxSplitByMonth: parsed.googleTxSplitByMonth ?? false,
         sheetSyncSig: parsed.sheetSyncSig && typeof parsed.sheetSyncSig === "object" ? parsed.sheetSyncSig : {},
+        hiddenChips: parsed.hiddenChips && typeof parsed.hiddenChips === "object" ? { expense: parsed.hiddenChips.expense || [], income: parsed.hiddenChips.income || [] } : { expense: ["食品", "衛生", "管理士代", "歯医者代"], income: [] },
       };
     } catch (e) {
       console.error("state load failed", e);
@@ -214,6 +216,7 @@
           googleSheetMigratedJa: parsed.googleSheetMigratedJa ?? false,
           googleTxSplitByMonth: parsed.googleTxSplitByMonth ?? false,
           sheetSyncSig: parsed.sheetSyncSig && typeof parsed.sheetSyncSig === "object" ? parsed.sheetSyncSig : {},
+          hiddenChips: parsed.hiddenChips && typeof parsed.hiddenChips === "object" ? { expense: parsed.hiddenChips.expense || [], income: parsed.hiddenChips.income || [] } : { expense: ["食品", "衛生", "管理士代", "歯医者代"], income: [] },
         };
         saveState();
         showBackupFeedback("Backup restored. Reloading…");
@@ -656,11 +659,11 @@
   let editingIncomeId = null;
 
   /** 過去に使った内容(カテゴリ)を、よく使う順(同数なら新しい順)に並べる */
-  function rankedValues(list, key) {
+  function rankedValues(list, key, excluded = new Set()) {
     const stat = new Map();
     list.forEach(x => {
       const v = String(x[key] || "").trim();
-      if (!v) return;
+      if (!v || excluded.has(v)) return;
       const cur = stat.get(v) || { count: 0, last: "" };
       cur.count++;
       if (x.date > cur.last) cur.last = x.date;
@@ -669,8 +672,8 @@
     return [...stat.entries()].sort((a, b) => b[1].count - a[1].count || b[1].last.localeCompare(a[1].last)).map(([v]) => v);
   }
 
-  /** 入力欄の下に「一度使った内容」をタブ(チップ)で並べる。タップで入力欄に入る */
-  function renderQuickChips(containerId, inputId, values) {
+  /** 入力欄の下に「一度使った内容」をタブ(チップ)で並べる。タップで入力欄に入り、長押しでこのタブを非表示にできる */
+  function renderQuickChips(containerId, inputId, values, kind) {
     const box = document.getElementById(containerId);
     const input = document.getElementById(inputId);
     if (!box || !input) return;
@@ -683,7 +686,26 @@
       b.className = "chip";
       b.dataset.value = v;
       b.textContent = v;
-      b.addEventListener("click", () => { input.value = v; refreshActive(); });
+      let timer = null, longPressed = false;
+      const cancel = () => { clearTimeout(timer); timer = null; };
+      b.addEventListener("pointerdown", () => {
+        longPressed = false;
+        timer = setTimeout(() => {
+          longPressed = true;
+          if (confirm(`「${v}」をタブに出さないようにしますか?\n(設定の「Show hidden category tabs」でいつでも戻せます)`)) {
+            state.hiddenChips[kind].push(v);
+            saveState();
+            if (kind === "income") updateIncomeSourceOptions(); else updateExpenseCategoryOptions();
+          }
+        }, 650);
+      });
+      ["pointerup", "pointerleave", "pointercancel"].forEach(ev => b.addEventListener(ev, cancel));
+      b.addEventListener("contextmenu", (e) => e.preventDefault());
+      b.addEventListener("click", () => {
+        if (longPressed) { longPressed = false; return; }
+        input.value = v;
+        refreshActive();
+      });
       box.appendChild(b);
     });
     if (!input.dataset.chipBound) { input.addEventListener("input", refreshActive); input.dataset.chipBound = "1"; }
@@ -691,7 +713,7 @@
   }
 
   function updateIncomeSourceOptions() {
-    renderQuickChips("income-source-chips", "income-quick-source", rankedValues(state.incomes, "source"));
+    renderQuickChips("income-source-chips", "income-quick-source", rankedValues(state.incomes, "source", new Set(state.hiddenChips.income)), "income");
     const datalist = document.getElementById("income-source-list");
     const unique = [...new Set(state.incomes.map(i => i.source).filter(Boolean))];
     datalist.innerHTML = unique.map(s => `<option value="${escapeHtml(s)}"></option>`).join("");
@@ -839,7 +861,9 @@
   const DEFAULT_EXPENSE_CATEGORIES = ["Groceries", "Rent", "Transport", "Utilities", "Entertainment", "Health", "Other"];
 
   function updateExpenseCategoryOptions() {
-    renderQuickChips("expense-category-chips", "expense-quick-category", rankedValues(state.expenses, "category"));
+    // 月初に自動追加される固定費(家賃など)と、非表示にしたものはタブに出さない
+    const excluded = new Set([...RECURRING_MONTHLY_EXPENSES.map(r => r.category), ...state.hiddenChips.expense]);
+    renderQuickChips("expense-category-chips", "expense-quick-category", rankedValues(state.expenses, "category", excluded), "expense");
     const datalist = document.getElementById("expense-category-list");
     const used = state.expenses.map(e => e.category).filter(Boolean);
     const unique = [...new Set([...DEFAULT_EXPENSE_CATEGORIES, ...used])];
@@ -2345,6 +2369,14 @@
       showGoogleFeedback(`Couldn't update the sheet: ${e && e.message ? e.message : e}`);
     }
     btn.disabled = false;
+  });
+
+  document.getElementById("reset-hidden-chips-btn").addEventListener("click", () => {
+    state.hiddenChips = { expense: [], income: [] };
+    saveState();
+    updateIncomeSourceOptions();
+    updateExpenseCategoryOptions();
+    showBackupFeedback("Hidden category tabs are back (fixed monthly costs stay hidden).");
   });
 
   document.getElementById("google-disconnect-btn").addEventListener("click", () => {
