@@ -655,7 +655,43 @@
   const incomeDeleteBtn = document.getElementById("income-delete-btn");
   let editingIncomeId = null;
 
+  /** 過去に使った内容(カテゴリ)を、よく使う順(同数なら新しい順)に並べる */
+  function rankedValues(list, key) {
+    const stat = new Map();
+    list.forEach(x => {
+      const v = String(x[key] || "").trim();
+      if (!v) return;
+      const cur = stat.get(v) || { count: 0, last: "" };
+      cur.count++;
+      if (x.date > cur.last) cur.last = x.date;
+      stat.set(v, cur);
+    });
+    return [...stat.entries()].sort((a, b) => b[1].count - a[1].count || b[1].last.localeCompare(a[1].last)).map(([v]) => v);
+  }
+
+  /** 入力欄の下に「一度使った内容」をタブ(チップ)で並べる。タップで入力欄に入る */
+  function renderQuickChips(containerId, inputId, values) {
+    const box = document.getElementById(containerId);
+    const input = document.getElementById(inputId);
+    if (!box || !input) return;
+    box.innerHTML = "";
+    box.classList.toggle("hidden-field", values.length === 0);
+    const refreshActive = () => box.querySelectorAll(".chip").forEach(c => c.classList.toggle("active", c.dataset.value === input.value.trim()));
+    values.slice(0, 20).forEach(v => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "chip";
+      b.dataset.value = v;
+      b.textContent = v;
+      b.addEventListener("click", () => { input.value = v; refreshActive(); });
+      box.appendChild(b);
+    });
+    if (!input.dataset.chipBound) { input.addEventListener("input", refreshActive); input.dataset.chipBound = "1"; }
+    refreshActive();
+  }
+
   function updateIncomeSourceOptions() {
+    renderQuickChips("income-source-chips", "income-quick-source", rankedValues(state.incomes, "source"));
     const datalist = document.getElementById("income-source-list");
     const unique = [...new Set(state.incomes.map(i => i.source).filter(Boolean))];
     datalist.innerHTML = unique.map(s => `<option value="${escapeHtml(s)}"></option>`).join("");
@@ -803,6 +839,7 @@
   const DEFAULT_EXPENSE_CATEGORIES = ["Groceries", "Rent", "Transport", "Utilities", "Entertainment", "Health", "Other"];
 
   function updateExpenseCategoryOptions() {
+    renderQuickChips("expense-category-chips", "expense-quick-category", rankedValues(state.expenses, "category"));
     const datalist = document.getElementById("expense-category-list");
     const used = state.expenses.map(e => e.category).filter(Boolean);
     const unique = [...new Set([...DEFAULT_EXPENSE_CATEGORIES, ...used])];
@@ -1540,11 +1577,11 @@
       addTo(yearMap, y, 0, e.amount, {});
     });
 
-    const monthRows = [...monthMap.keys()].sort().map(k => {
+    const monthRows = [...monthMap.keys()].sort().reverse().map(k => { // 新しい月が上
       const v = monthMap.get(k);
       return [`${v.year}年${v.month + 1}月`, v.income, v.expense, v.income - v.expense];
     });
-    const yearRows = [...yearMap.keys()].sort((a, b) => a - b).map(y => {
+    const yearRows = [...yearMap.keys()].sort((a, b) => b - a).map(y => { // 新しい年が上
       const v = yearMap.get(y);
       return [`${y}年 合計`, v.income, v.expense, v.income - v.expense];
     });
@@ -1596,6 +1633,20 @@
 
   /** 収入(A〜C列)と支出(E〜G列)を左右に分けた2次元配列を組み立てる。
    *  1行目=区分見出し、2行目=列見出し、以降データ、最終行=合計・差額。 */
+  // 円グラフ用の集計表の位置(0始まりの列番号): W列=22, Z列=25
+  const CHART_INC_COL = 22;
+  const CHART_EXP_COL = 25;
+
+  /** 内容(カテゴリ)ごとの合計を、金額の大きい順に返す。内容が空のものは「未分類」にまとめる */
+  function categoryTotals(list, key) {
+    const map = new Map();
+    list.forEach(x => {
+      const name = String(x[key] || "").trim() || "未分類";
+      map.set(name, (map.get(name) || 0) + x.amount);
+    });
+    return [...map.entries()].sort((a, b) => b[1] - a[1]);
+  }
+
   function buildIncomeExpenseGrid(incomes, expenses) {
     const incomeRows = incomes.slice().sort((a, b) => a.date.localeCompare(b.date))
       .map(i => [i.date, i.source || "", i.amount]);
@@ -1614,8 +1665,25 @@
     }
     const totalIncome = incomes.reduce((s, i) => s + i.amount, 0);
     const totalExpense = expenses.reduce((s, e) => s + e.amount, 0);
+    grid.totalsStart = grid.length; // 「合計」行の位置(書式用。配列の添字ではないのでJSON化には影響しない)
     grid.push(["合計", "", totalIncome, "", "合計", "", totalExpense]);
     grid.push(["差額(収入-支出)", "", totalIncome - totalExpense, "", "", "", ""]);
+
+    // 円グラフ用のカテゴリ別集計を、右端(W〜X列=収入 / Z〜AA列=支出)に置く
+    const incCats = categoryTotals(incomes, "source");
+    const expCats = categoryTotals(expenses, "category");
+    grid.incCount = incCats.length;
+    grid.expCount = expCats.length;
+    const setCell = (r, c, v) => {
+      while (grid.length <= r) grid.push([]);
+      const row = grid[r];
+      while (row.length <= c) row.push("");
+      row[c] = v;
+    };
+    setCell(0, CHART_INC_COL, "収入カテゴリ別"); setCell(0, CHART_INC_COL + 1, "金額");
+    setCell(0, CHART_EXP_COL, "支出カテゴリ別"); setCell(0, CHART_EXP_COL + 1, "金額");
+    incCats.forEach(([name, amt], i) => { setCell(i + 1, CHART_INC_COL, name); setCell(i + 1, CHART_INC_COL + 1, amt); });
+    expCats.forEach(([name, amt], i) => { setCell(i + 1, CHART_EXP_COL, name); setCell(i + 1, CHART_EXP_COL + 1, amt); });
     return grid;
   }
 
@@ -1631,20 +1699,23 @@
 
   /** 指定タブの中身(A〜G列)をまるごとクリアしてから書き直す */
   async function writeGridToSheet(token, sheetTitle, grid) {
-    const clearRes = await clearSheetValues(token, sheetTitle, "G");
+    const clearRes = await clearSheetValues(token, sheetTitle, "AA");
     if (!clearRes.ok) throw await apiError(clearRes, `「${sheetTitle}」のクリア失敗`);
     const res = await putRows(token, sheetTitle, grid);
     if (!res.ok) throw await apiError(res, `「${sheetTitle}」の書き込み失敗`);
   }
 
+  const chartIdsBySheet = {}; // sheetId -> そのタブに既にある円グラフのID(作り直す時に消すため)
+
   /** 指定タブがまだ無ければ追加し、そのタブの sheetId を返す(月ごとの取引タブ用) */
   async function ensureNamedSheetTab(token, title) {
     const metaRes = await fetch(
-      `https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}?fields=sheets.properties(sheetId,title)`,
+      `https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}?fields=sheets(properties(sheetId,title),charts(chartId))`,
       { headers: { Authorization: `Bearer ${token}` } }
     );
     if (!metaRes.ok) throw await apiError(metaRes, `get spreadsheet meta failed`);
     const meta = await metaRes.json();
+    (meta.sheets || []).forEach(sh => { chartIdsBySheet[sh.properties.sheetId] = (sh.charts || []).map(c => c.chartId); });
     const found = (meta.sheets || []).find(s => s.properties.title === title);
     if (found) return found.properties.sheetId;
     const batchRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}:batchUpdate`, {
@@ -1654,12 +1725,20 @@
     });
     if (!batchRes.ok) throw await apiError(batchRes, `タブ「${title}」の追加失敗`);
     const batchData = await batchRes.json();
+    chartIdsBySheet[batchData.replies[0].addSheet.properties.sheetId] = [];
     return batchData.replies[0].addSheet.properties.sheetId;
   }
 
   /** 月ごとの取引タブに、ヘッダー色付け・見出し固定・合計行の強調を適用する。
    *  行が増減すると合計行の位置が変わるので、先にデータ行の書式をリセットしてから付け直す。 */
   async function styleNamedTransactionsSheet(token, sheetId, grid) {
+    const pieRange = (col, count) => ({ sources: [{ sheetId, startRowIndex: 1, endRowIndex: 1 + count, startColumnIndex: col, endColumnIndex: col + 1 }] });
+    const pie = (title, col, count, anchorCol) => ({
+      addChart: { chart: {
+        spec: { title, pieChart: { legendPosition: "RIGHT_LEGEND", domain: { sourceRange: pieRange(col, count) }, series: { sourceRange: pieRange(col + 1, count) } } },
+        position: { overlayPosition: { anchorCell: { sheetId, rowIndex: 1, columnIndex: anchorCol }, widthPixels: 460, heightPixels: 300 } },
+      } },
+    });
     const requests = [
       {
         repeatCell: {
@@ -1668,8 +1747,19 @@
           fields: "userEnteredFormat(backgroundColor,textFormat)",
         },
       },
-      ...transactionsHeaderStyleRequests(sheetId, grid.length - 2),
+      ...transactionsHeaderStyleRequests(sheetId, grid.totalsStart),
+      // カテゴリ別集計(グラフ用データ)の見出し・3桁区切り
+      ...[CHART_INC_COL, CHART_EXP_COL].flatMap(col => [
+        { repeatCell: { range: { sheetId, startRowIndex: 0, endRowIndex: 1, startColumnIndex: col, endColumnIndex: col + 2 },
+            cell: { userEnteredFormat: { textFormat: { bold: true }, backgroundColor: { red: 0.93, green: 0.93, blue: 0.93 } } }, fields: "userEnteredFormat(textFormat,backgroundColor)" } },
+        { repeatCell: { range: { sheetId, startRowIndex: 1, startColumnIndex: col + 1, endColumnIndex: col + 2 },
+            cell: { userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "#,##0" } } }, fields: "userEnteredFormat.numberFormat" } },
+      ]),
+      // 円グラフは毎回作り直す(古いものを消してから、今のデータで追加)
+      ...(chartIdsBySheet[sheetId] || []).map(chartId => ({ deleteEmbeddedObject: { objectId: chartId } })),
     ];
+    if (grid.incCount > 0) requests.push(pie("収入のカテゴリ別内訳", CHART_INC_COL, grid.incCount, 8));
+    if (grid.expCount > 0) requests.push(pie("支出のカテゴリ別内訳", CHART_EXP_COL, grid.expCount, 14));
     const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${state.googleSpreadsheetId}:batchUpdate`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
@@ -1987,7 +2077,7 @@
   function buildMoodsSheet() {
     const grid = [["日時", "内容"]];
     const ids = [];
-    state.emotionLogs.slice().sort((a, b) => a.createdAt.localeCompare(b.createdAt)).forEach(e => {
+    state.emotionLogs.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt)).forEach(e => { // 新しい順(上が最新)
       const d = new Date(e.createdAt);
       grid.push([`${e.date} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`, e.text]);
       ids.push(e.id);
@@ -2050,8 +2140,8 @@
   function hasPendingSheetWork() {
     if (!isSheetConnected()) return false;
     const w = computeDirtySheetWork();
-    // fmtV1 が無い = 書式の更新(3桁区切りなど)がまだ既存タブに適用されていない
-    return w.months.length > 0 || w.summaryDirty || w.extras.length > 0 || !(state.sheetSyncSig && state.sheetSyncSig.fmtV1);
+    // fmtV2 が無い = 書式の更新(3桁区切りなど)がまだ既存タブに適用されていない
+    return w.months.length > 0 || w.summaryDirty || w.extras.length > 0 || !(state.sheetSyncSig && state.sheetSyncSig.fmtV2);
   }
 
   /** 画面右上の「☁ Synced / Syncing… / Not synced」表示を更新する */
@@ -2094,7 +2184,7 @@
     if (!force && Date.now() < sheetAutoSync.backoffUntil) { updateSyncBadge(); return { ok: false, reason: "backoff" }; }
     if (full) invalidateSheetSigs();
     // 書式の仕様を変えたとき(3桁区切り追加など)は、既存のタブにも一度だけ適用し直す
-    if (!state.sheetSyncSig.fmtV1) invalidateSheetSigs();
+    if (!state.sheetSyncSig.fmtV2) invalidateSheetSigs();
 
     const first = computeDirtySheetWork();
     if (!first.months.length && !first.summaryDirty && !first.extras.length) { updateSyncBadge(); return { ok: true, months: 0, moods: 0 }; }
@@ -2120,7 +2210,7 @@
         for (const def of work.extras) { await syncExtraSheet(token, def); result.months++; await sleep(300); }
       } while (sheetAutoSync.again);
 
-      state.sheetSyncSig.fmtV1 = "1";
+      state.sheetSyncSig.fmtV2 = "1";
       saveState();
       sheetAutoSync.backoffUntil = 0;
       sheetAutoSync.lastError = "";

@@ -695,3 +695,34 @@ textarea { resize: vertical; }
   transition: transform .12s ease, background-color .15s ease;
 }
 .danger-btn:active { transform: scale(0.97); background: color-mix(in srgb, var(--danger) 10%, transparent); }
+
+/* Quick-add: previously used categories as tappable chips */
+.chip-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+.chip-row::-webkit-scrollbar { display: none; }
+.chip {
+  flex: 0 0 auto;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-secondary);
+  border-radius: var(--radius-pill);
+  padding: 7px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  transition: transform .12s ease, color .15s ease, border-color .15s ease, background-color .15s ease;
+}
+.chip:active { transform: scale(0.95); }
+.chip.active {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 70%, transparent);
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  box-shadow: 0 0 14px color-mix(in srgb, var(--accent) 35%, transparent);
+}
