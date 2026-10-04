@@ -78,7 +78,6 @@
   // Googleシート自動同期の状態(saveStateから参照されるため、早めに宣言しておく)
   const sheetAutoSync = { running: false, again: false, backoffUntil: 0, lastError: "" };
   let sheetOpDepth = 0; // 手動の同期処理(サインイン等)の最中は自動同期を待たせる
-  const moodSyncInFlight = new Set(); // 気持ちの二重送信を防ぐ
   // 月が変わったら自動で追加する固定費(毎月1日付けの支出として計上)
   const RECURRING_MONTHLY_EXPENSES = [
     { category: "家賃", amount: 35000 },
@@ -1171,20 +1170,19 @@
     input.value = "";
     renderEmotionLog();
 
-    if (!state.googleClientId) return;
+    if (!isSheetConnected()) return;
 
     const btn = document.getElementById("emotion-save-btn");
     btn.disabled = true;
     showEmotionSyncFeedback("Saving to Google Sheets…");
-    const result = await syncEmotionEntryToSheets(entry);
+    // 保存時の saveState() で自動同期が始まっている。終わるのを待って結果を表示する
+    await waitForSheetIdle();
     btn.disabled = false;
-    if (result.ok) {
-      entry.syncedToSheets = true;
-      saveState();
-      renderEmotionLog();
+    renderEmotionLog();
+    if (entry.syncedToSheets) {
       showEmotionSyncFeedback("Saved to Google Sheets");
     } else {
-      showEmotionSyncFeedback("Couldn't save to Google Sheets. You can retry later from Settings.");
+      showEmotionSyncFeedback("Couldn't save to Google Sheets yet. Tap the ☁ badge to retry.");
     }
   });
 
@@ -1865,48 +1863,6 @@
     saveState();
   }
 
-  /** 「今日の気持ち」を記録した瞬間にGoogle Sheetsへ即時保存する */
-  async function syncEmotionEntryToSheets(entry, { interactive } = {}) {
-    if (!state.googleClientId) return { ok: false, reason: "no-client-id" };
-    if (moodSyncInFlight.has(entry.id)) return { ok: false, reason: "in-flight" };
-    moodSyncInFlight.add(entry.id);
-    try {
-      let token = await requestGoogleToken(false);
-      if (!token && interactive !== false) token = await requestGoogleToken(true);
-      if (!token) return { ok: false, reason: "auth-required" };
-
-      await ensureSpreadsheet(token);
-      await ensureModernSheetLayout(token);
-      const d = new Date(entry.createdAt);
-      const timestamp = `${entry.date} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
-      await appendRowsToRange(token, a1(SHEET_MOODS, "A:B"), [[timestamp, entry.text]]);
-      return { ok: true };
-    } catch (e) {
-      console.error("emotion sync failed", e);
-      return { ok: false, reason: "api-error", message: e && e.message ? e.message : String(e) };
-    } finally {
-      moodSyncInFlight.delete(entry.id);
-    }
-  }
-
-  /** 未送信のまま残っている気持ちの記録を、まとめて再送信する。
-   *  minAgeMs を指定すると、記録直後(保存ボタン側で送信中)のものは対象から外す。 */
-  async function syncPendingEmotionLogs({ interactive, minAgeMs = 0 } = {}) {
-    const now = Date.now();
-    const pending = state.emotionLogs.filter(e =>
-      !e.syncedToSheets && !moodSyncInFlight.has(e.id) && now - new Date(e.createdAt).getTime() >= minAgeMs);
-    let successCount = 0;
-    for (const entry of pending) {
-      const result = await syncEmotionEntryToSheets(entry, { interactive });
-      if (result.reason === "in-flight") continue;
-      if (!result.ok) break; // 認証切れなどの場合は以降も失敗するため打ち切る
-      entry.syncedToSheets = true;
-      successCount++;
-    }
-    if (successCount > 0) saveState();
-    return { successCount, remaining: pending.length - successCount };
-  }
-
   // ---------------------------------------------------------------------
   // 収入・支出の自動同期
   //  - 月ごとの内容(グリッド)の「ハッシュ」を、シートへ書き込めた時点で state.sheetSyncSig に記録
@@ -2027,7 +1983,30 @@
     ];
   }
 
+  /** 気持ちタブ: Mood Board の全記録を日時順に並べ直す(毎回まるごと再生成するので、過去の取りこぼしも直る) */
+  function buildMoodsSheet() {
+    const grid = [["日時", "内容"]];
+    const ids = [];
+    state.emotionLogs.slice().sort((a, b) => a.createdAt.localeCompare(b.createdAt)).forEach(e => {
+      const d = new Date(e.createdAt);
+      grid.push([`${e.date} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`, e.text]);
+      ids.push(e.id);
+    });
+    return { grid, blocks: [], ids };
+  }
+
+  function moodsStyleRequests(sheetId) {
+    return [
+      { repeatCell: { range: { sheetId, startRowIndex: 1 }, cell: { userEnteredFormat: {} }, fields: "userEnteredFormat" } },
+      ...headerStyleRequests(sheetId, 2),
+      { updateDimensionProperties: { range: { sheetId, dimension: "COLUMNS", startIndex: 0, endIndex: 1 }, properties: { pixelSize: 150 }, fields: "pixelSize" } },
+      { updateDimensionProperties: { range: { sheetId, dimension: "COLUMNS", startIndex: 1, endIndex: 2 }, properties: { pixelSize: 460 }, fields: "pixelSize" } },
+      { repeatCell: { range: { sheetId, startRowIndex: 1, startColumnIndex: 1, endColumnIndex: 2 }, cell: { userEnteredFormat: { wrapStrategy: "WRAP" } }, fields: "userEnteredFormat.wrapStrategy" } },
+    ];
+  }
+
   const EXTRA_SHEETS = [
+    { key: "moods", title: SHEET_MOODS, lastCol: "B", build: buildMoodsSheet, style: moodsStyleRequests },
     { key: "habits", title: "習慣", lastCol: "AH", build: buildHabitsSheet, style: habitsStyleRequests },
     { key: "tasks", title: "やること", lastCol: "D", build: buildTasksSheet, style: tasksStyleRequests },
   ];
@@ -2046,6 +2025,7 @@
     });
     if (!styleRes.ok) throw await apiError(styleRes, `「${def.title}」の書式適用失敗`);
     state.sheetSyncSig[def.key] = hashString(JSON.stringify(built.grid));
+    if (built.ids) state.emotionLogs.forEach(e => { if (built.ids.includes(e.id)) e.syncedToSheets = true; });
     saveState();
   }
 
@@ -2067,13 +2047,11 @@
     return { months, summaryDirty, extras };
   }
 
-  function hasUnsyncedMoods() { return state.emotionLogs.some(e => !e.syncedToSheets); }
-
   function hasPendingSheetWork() {
     if (!isSheetConnected()) return false;
     const w = computeDirtySheetWork();
     // fmtV1 が無い = 書式の更新(3桁区切りなど)がまだ既存タブに適用されていない
-    return w.months.length > 0 || w.summaryDirty || w.extras.length > 0 || hasUnsyncedMoods() || !(state.sheetSyncSig && state.sheetSyncSig.fmtV1);
+    return w.months.length > 0 || w.summaryDirty || w.extras.length > 0 || !(state.sheetSyncSig && state.sheetSyncSig.fmtV1);
   }
 
   /** 画面右上の「☁ Synced / Syncing… / Not synced」表示を更新する */
@@ -2119,10 +2097,7 @@
     if (!state.sheetSyncSig.fmtV1) invalidateSheetSigs();
 
     const first = computeDirtySheetWork();
-    const now = Date.now();
-    const moodsPending = state.emotionLogs.some(e =>
-      !e.syncedToSheets && !moodSyncInFlight.has(e.id) && now - new Date(e.createdAt).getTime() >= (force ? 0 : 15000));
-    if (!first.months.length && !first.summaryDirty && !first.extras.length && !moodsPending) { updateSyncBadge(); return { ok: true, months: 0, moods: 0 }; }
+    if (!first.months.length && !first.summaryDirty && !first.extras.length) { updateSyncBadge(); return { ok: true, months: 0, moods: 0 }; }
 
     sheetAutoSync.running = true;
     updateSyncBadge();
@@ -2145,8 +2120,6 @@
         for (const def of work.extras) { await syncExtraSheet(token, def); result.months++; await sleep(300); }
       } while (sheetAutoSync.again);
 
-      const moodResult = await syncPendingEmotionLogs({ interactive: false, minAgeMs: force ? 0 : 15000 });
-      result.moods = moodResult.successCount;
       state.sheetSyncSig.fmtV1 = "1";
       saveState();
       sheetAutoSync.backoffUntil = 0;
@@ -2162,6 +2135,14 @@
       updateSyncBadge();
     }
     return result;
+  }
+
+  /** 自動同期が一段落する(実行中でなくなる)まで待つ。最大60秒 */
+  async function waitForSheetIdle() {
+    for (let i = 0; i < 300; i++) {
+      if (!sheetAutoSync.running && sheetOpDepth === 0) break;
+      await sleep(200);
+    }
   }
 
   function scheduleSheetAutoSync() {
@@ -2241,7 +2222,7 @@
     updateGoogleStatusUI();
     renderEmotionLog();
     if (result.ok) {
-      showGoogleFeedback(`Sheet fully updated (${result.months} month tab(s)) and ${result.moods} mood entries sent`);
+      showGoogleFeedback(`Sheet fully updated (${result.months} tab(s) rewritten, incl. Mood Board)`);
     } else if (result.reason === "busy") {
       showGoogleFeedback("A sync is already running — try again in a moment");
     } else {
