@@ -1946,7 +1946,8 @@
   function hasPendingSheetWork() {
     if (!isSheetConnected()) return false;
     const w = computeDirtySheetWork();
-    return w.months.length > 0 || w.summaryDirty || hasUnsyncedMoods();
+    // fmtV1 が無い = 書式の更新(3桁区切りなど)がまだ既存タブに適用されていない
+    return w.months.length > 0 || w.summaryDirty || hasUnsyncedMoods() || !(state.sheetSyncSig && state.sheetSyncSig.fmtV1);
   }
 
   /** 画面右上の「☁ Synced / Syncing… / Not synced」表示を更新する */
@@ -2234,4 +2235,12 @@
     if (googleAccessToken && Date.now() < googleTokenExpiresAt) scheduleSheetAutoSync();
   });
   updateSyncBadge();
+  // どの版が動いているか確認できるように、設定画面にバージョンを表示する(キャッシュ更新の確認用)
+  if ("caches" in window) {
+    caches.keys().then(keys => {
+      const v = keys.map(k => (/^growthquest-(v\d+)$/.exec(k) || [])[1]).filter(Boolean).sort((a, b) => parseInt(a.slice(1)) - parseInt(b.slice(1))).pop();
+      const el = document.getElementById("app-version");
+      if (el) el.textContent = v || "unknown";
+    }).catch(() => {});
+  }
 })();
