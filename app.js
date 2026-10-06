@@ -505,7 +505,15 @@
 
   function toggleHabitDate(habit, key) {
     const idx = habit.completedDates.indexOf(key);
-    if (idx >= 0) habit.completedDates.splice(idx, 1); else habit.completedDates.push(key);
+    if (idx >= 0) {
+      habit.completedDates.splice(idx, 1);
+    } else {
+      habit.completedDates.push(key);
+      // 習慣を作った日より前の日(前日など)にチェックしたら、その日から始めていたことにする
+      // (そうしないと、その日の達成率・達成数の集計に含まれないため)
+      const day = parseDateKey(key);
+      if (day < dateOnly(new Date(habit.createdAt))) habit.createdAt = day.toISOString();
+    }
     saveState();
   }
 
@@ -557,16 +565,14 @@
     let body = "<tbody>";
     state.habits.forEach(habit => {
       body += `<tr><td class="col-name" data-habit-edit="${habit.id}"><span class="habit-name-text">${escapeHtml(habit.title)}</span></td>`;
-      const createdOnly = dateOnly(new Date(habit.createdAt));
       days.forEach(d => {
         const key = dateKey(d);
         const done = habit.completedDates.includes(key);
         const isFuture = d > todayOnly;
-        const beforeStart = d < createdOnly;
         const isToday = key === todayKeyStr;
         const classes = ["habit-cell-btn"];
         if (done) classes.push("done");
-        if (isFuture || beforeStart) classes.push("future");
+        if (isFuture) classes.push("future"); // 未来の日だけ押せない。過去の日(前日など)は作成日より前でもチェックできる
         if (isToday) classes.push("today-col");
         body += `<td><button type="button" class="${classes.join(" ")}" data-habit="${habit.id}" data-date="${key}"><span class="box">✓</span></button></td>`;
       });
