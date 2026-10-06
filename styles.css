@@ -465,6 +465,22 @@ table.habit-grid {
   color: white;
 }
 .habit-cell-btn.future { opacity: 0.3; pointer-events: none; }
+.habit-cell-btn.dim { opacity: 0.28; pointer-events: none; }
+.habit-grid .day-head.pickable { cursor: pointer; -webkit-user-select: none; user-select: none; }
+.habit-grid .day-head.pickable:active { background: color-mix(in srgb, var(--accent) 16%, transparent); border-radius: 10px 10px 0 0; }
+.habit-grid .day-head.todaymark .dn { text-decoration: underline; text-decoration-color: var(--accent); text-underline-offset: 3px; }
+.habit-edit-note {
+  display: block;
+  margin: 0 auto 12px;
+  padding: 8px 16px;
+  border-radius: var(--radius-pill);
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent-2);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
 .habit-cell-btn.today-col { background: color-mix(in srgb, var(--accent) 14%, transparent); }
 
 .habit-grid tfoot .col-name { font-weight: 800; font-size: 11px; letter-spacing: 0.03em; text-transform: uppercase; color: var(--text-secondary); }

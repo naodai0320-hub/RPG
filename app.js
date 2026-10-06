@@ -109,7 +109,7 @@
 
   function renderView(name) {
     if (name === "home") renderHome();
-    if (name === "habits") renderHabitsView(true);
+    if (name === "habits") { habitEditKey = null; renderHabitsView(true); }
     if (name === "income") renderIncomeView();
     if (name === "expense") renderExpenseView();
     if (name === "goals") renderGoals();
@@ -450,6 +450,9 @@
   let editingHabitId = null;
 
   let viewMonth = { year: today.getFullYear(), month: today.getMonth() };
+  // チェックできるのは「選択中の日」の列だけ(初期値は今日)。日付をタッチすると別の日に切り替わる
+  let habitEditKey = null;
+  function currentHabitEditKey() { return habitEditKey || dateKey(new Date()); }
 
   function renderHabitGoalOptions() {
     habitGoalSelect.innerHTML = '<option value="">None</option>';
@@ -551,12 +554,15 @@
     const days = daysInMonth(viewMonth.year, viewMonth.month);
     const todayKeyStr = dateKey(new Date());
     const todayOnly = dateOnly(new Date());
+    const editKey = currentHabitEditKey();
 
     let head = '<thead><tr><th class="col-name">Habit</th>';
     days.forEach(d => {
       const isWeekend = d.getDay() === 0 || d.getDay() === 6;
-      const isToday = dateKey(d) === todayKeyStr;
-      head += `<th class="day-head${isWeekend ? " weekend" : ""}${isToday ? " today" : ""}">
+      const k = dateKey(d);
+      const isFutureDay = d > todayOnly;
+      const isEdit = k === editKey;
+      head += `<th class="day-head${isWeekend ? " weekend" : ""}${isEdit ? " today" : ""}${!isEdit && k === todayKeyStr ? " todaymark" : ""}${isFutureDay ? "" : " pickable"}" data-date="${k}">
         <span class="wd">${WEEKDAY_LABELS[d.getDay()]}</span><span class="dn">${d.getDate()}</span>
       </th>`;
     });
@@ -569,11 +575,12 @@
         const key = dateKey(d);
         const done = habit.completedDates.includes(key);
         const isFuture = d > todayOnly;
-        const isToday = key === todayKeyStr;
+        const isEdit = key === editKey;
         const classes = ["habit-cell-btn"];
         if (done) classes.push("done");
-        if (isFuture) classes.push("future"); // 未来の日だけ押せない。過去の日(前日など)は作成日より前でもチェックできる
-        if (isToday) classes.push("today-col");
+        if (isFuture) classes.push("future");
+        else if (!isEdit) classes.push("dim"); // 選択中の日以外は薄く表示して押せない(日付をタッチして切り替える)
+        if (isEdit) classes.push("today-col");
         body += `<td><button type="button" class="${classes.join(" ")}" data-habit="${habit.id}" data-date="${key}"><span class="box">✓</span></button></td>`;
       });
       body += "</tr>";
@@ -590,8 +597,14 @@
   }
 
   habitGrid.addEventListener("click", (e) => {
+    const head = e.target.closest(".day-head.pickable");
+    if (head) {
+      habitEditKey = head.dataset.date === dateKey(new Date()) ? null : head.dataset.date;
+      renderHabitsView();
+      return;
+    }
     const cellBtn = e.target.closest(".habit-cell-btn");
-    if (cellBtn && !cellBtn.classList.contains("future")) {
+    if (cellBtn && !cellBtn.classList.contains("future") && !cellBtn.classList.contains("dim")) {
       const habit = state.habits.find(h => h.id === cellBtn.dataset.habit);
       if (habit) {
         toggleHabitDate(habit, cellBtn.dataset.date);
@@ -607,20 +620,33 @@
     }
   });
 
+  document.getElementById("habit-edit-note").addEventListener("click", () => { habitEditKey = null; renderHabitsView(true); });
+
   document.getElementById("month-prev").addEventListener("click", () => {
     viewMonth.month -= 1;
     if (viewMonth.month < 0) { viewMonth.month = 11; viewMonth.year -= 1; }
+    habitEditKey = null;
     renderHabitsView(true);
   });
   document.getElementById("month-next").addEventListener("click", () => {
     viewMonth.month += 1;
     if (viewMonth.month > 11) { viewMonth.month = 0; viewMonth.year += 1; }
+    habitEditKey = null;
     renderHabitsView(true);
   });
 
   function renderHabitsView(jumpToToday = false) {
     document.getElementById("month-label").textContent = formatMonthYear(viewMonth.year, viewMonth.month);
     document.getElementById("habit-count-stat").textContent = String(state.habits.length);
+    const noteEl = document.getElementById("habit-edit-note");
+    if (noteEl) {
+      const editing = habitEditKey && habitEditKey !== dateKey(new Date());
+      noteEl.classList.toggle("hidden-field", !editing);
+      if (editing) {
+        const d = parseDateKey(habitEditKey);
+        noteEl.textContent = `Editing ${WEEKDAY_LABELS[d.getDay()]} ${d.getMonth() + 1}/${d.getDate()} · tap to go back to today`;
+      }
+    }
 
     const hasHabits = state.habits.length > 0;
     document.getElementById("habit-empty").classList.toggle("show", !hasHabits);
@@ -2433,6 +2459,7 @@
 
     const oldTodayKey = dateKey(today);
     today = now;
+    habitEditKey = null;
 
     [
       [incomeQuickDate, "value"],
